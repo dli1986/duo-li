@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 1 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class="active"><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <span class="nav-prev disabled">← Prev</span>
+      <span class="step-counter">Step 1 / 20</span>
+      <a href="step02.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">1</span>Raw text → Tokenizer → Token IDs</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1100 320" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step01.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep1(ctx, 1100, 320);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">Real text from your dataset, encoded character by character</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">stoi = {ch:i for i,ch in enumerate(chars)}
+data = torch.tensor(encode(text), dtype=torch.long)</code>
+    <div class="shape-line">string  →  <span class="tag">(N,) = (1115394,)</span></div>
+    <p>Every character in your 1.1M-character dataset gets replaced by its integer id from a fixed 65-character vocabulary. This is <b>1D</b> — one giant flat list, no batch or sequence grouping yet.</p>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>tokenizer setup</b> (gpt-dev.ipynb)</span><span>run once, before training starts</span></div>
+    <pre># here are all the unique characters that occur in this text
+<span class="hl">chars = sorted(list(set(text)))</span>
+<span class="hl">vocab_size = len(chars)</span>
+
+# create a mapping from characters to integers
+<span class="hl">stoi = { ch:i for i,ch in enumerate(chars) }</span>
+itos = { i:ch for i,ch in enumerate(chars) }
+<span class="hl">encode = lambda s: [stoi[c] for c in s]</span> # encoder: string -&gt; list of ints
+decode = lambda l: ''.join([itos[i] for i in l]) # decoder: list of ints -&gt; string
+
+# let's now encode the entire text dataset and store it into a torch.Tensor
+<span class="hl">data = torch.tensor(encode(text), dtype=torch.long)</span>
+
+<span class="dim"># split into train/val — used by get_batch() in the next step
+n = int(0.9*len(data))
+train_data = data[:n]
+val_data = data[n:]</span></pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>Nothing PyTorch-internal here yet</b> — <code class="inline">stoi</code>/<code class="inline">itos</code> are plain Python dicts, <code class="inline">encode</code>/<code class="inline">decode</code> are plain Python list comprehensions. The only PyTorch call is <code class="inline">torch.tensor(...)</code>, which just copies the Python list into a contiguous <code class="inline">int64</code> array.</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>d6753cbc</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># here are all the unique characters that occur in this text</span>
+<span class="n">chars</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">text</span><span class="p">)))</span>
+<span class="n">vocab_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">chars</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;&#39;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">chars</span><span class="p">))</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">vocab_size</span><span class="p">)</span>
+</pre></div>
+
+    </details>
+    
+    <details >
+      <summary>cell <code>b8e70e1f</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># create a mapping from characters to integers</span>
+<span class="n">stoi</span> <span class="o">=</span> <span class="p">{</span> <span class="n">ch</span><span class="p">:</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span><span class="p">,</span><span class="n">ch</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">chars</span><span class="p">)</span> <span class="p">}</span>
+<span class="n">itos</span> <span class="o">=</span> <span class="p">{</span> <span class="n">i</span><span class="p">:</span><span class="n">ch</span> <span class="k">for</span> <span class="n">i</span><span class="p">,</span><span class="n">ch</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">chars</span><span class="p">)</span> <span class="p">}</span>
+<span class="n">encode</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="p">[</span><span class="n">stoi</span><span class="p">[</span><span class="n">c</span><span class="p">]</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">s</span><span class="p">]</span> <span class="c1"># encoder: take a string, output a list of integers</span>
+<span class="n">decode</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">l</span><span class="p">:</span> <span class="s1">&#39;&#39;</span><span class="o">.</span><span class="n">join</span><span class="p">([</span><span class="n">itos</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">l</span><span class="p">])</span> <span class="c1"># decoder: take a list of integers, output a string</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;hii there&quot;</span><span class="p">))</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">decode</span><span class="p">(</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;hii there&quot;</span><span class="p">)))</span>
+</pre></div>
+
+    </details>
+    
+    <details >
+      <summary>cell <code>9554e929</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># let&#39;s now encode the entire text dataset and store it into a torch.Tensor</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span> <span class="c1"># we use PyTorch: https://pytorch.org</span>
+<span class="n">data</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="n">encode</span><span class="p">(</span><span class="n">text</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">long</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">shape</span><span class="p">,</span> <span class="n">data</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">data</span><span class="p">[:</span><span class="mi">1000</span><span class="p">])</span> <span class="c1"># the 1000 characters we looked at earier will to the GPT look like this</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>d1a51b2b</code></summary>
+      <hr />
+<h2>五个核心问题</h2>
+<h3>Q1: 1D / 2D / 3D — 是真实的数据形状，不是比喻</h3>
+<pre><code>原始文本 &quot;First Citizen:\nBefore...&quot;
+    ↓ encode()
+1D tensor: [18, 47, 56, 57, 58, ...], shape=(1115394,)    ← 真实的，就是全部 token
+
+    ↓ get_batch()
+2D tensor: shape=(B, T) = (16, 32)                        ← B 行独立序列，每行 T 个 token ID
+
+    ↓ token_embedding_table(x)
+3D tensor: shape=(B, T, n_embd) = (16, 32, 64)           ← 每个 token ID 扩展成 n_embd 维向量
+</code></pre>
+<hr />
+<h3>Q2: Causal Mask — 什么时候必须用，什么时候不需要（容易被简化过头的一点）</h3>
+<p><strong>训练时</strong>：整个序列 (B, T) 并行喂入模型，mask 让位置 t 只能看 <strong>0..t（含它自己）</strong>，防止&quot;作弊&quot;看到未来。</p>
+<p><strong>推理时要分两种情况，不能一概而论</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>一次前向传播里同时存在几个 query 位置？</th>
+<th>需要显式 causal mask 吗？</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>prefill</strong>（处理 prompt，P 个 token 并行喂入）</td>
+<td>P 个（多个位置同时算 attention）</td>
+<td><strong>需要</strong></td>
+<td>和训练一样，多个位置互相看得见，必须显式挡住&quot;看未来&quot;</td>
+</tr>
+<tr>
+<td><strong>incremental decode</strong>（用 KV Cache，每步只喂 1 个新 token）</td>
+<td>1 个（只有当前新 token 在提问）</td>
+<td><strong>不需要</strong></td>
+<td><code>k_cache</code>/<code>v_cache</code> 里只可能装着&quot;过去和现在&quot;的 K/V，天生不存在&quot;未来&quot;可看，没有东西需要挡</td>
+</tr>
+</tbody>
+</table>
+<p><strong>一句话记住</strong>：&quot;要不要 mask&quot; 的本质不是&quot;训练 vs 推理&quot;，而是**&quot;这次前向传播里，是不是有不止一个位置在同时计算 attention&quot;**——
+只要是多位置并行（训练的整个 batch，或推理时的 prefill），就必须显式 mask；只要是单 query 对历史 cache（KV Cache 的增量解码），mask 天然不需要，因为压根没有&quot;未来&quot;存在于 cache 里。</p>
+<p>KV Cache 是一个<strong>工程优化</strong>：缓存已经计算过的 K 和 V 矩阵，避免每一步重复计算。但它有一个常被忽略的副作用——<strong>顺便让 mask 变得不必要</strong>（因为单 query 场景下没有未来可看）。准确的说法不是&quot;KV Cache 不改变 mask 的必要性&quot;，而是<strong>KV Cache 恰好改变了要不要 mask 这件事本身</strong>。</p>
+<hr />
+<h3>Q3: Autoregressive — 用自己的输出作为下一步输入，与 KV Cache 无关</h3>
+<p>&quot;Auto&quot;（自）+ &quot;Regressive&quot;（回归，即用历史预测未来）</p>
+<pre><code class="language-python"># generate() 的本质逻辑：
+# step 1: 输入 [t0]               → 预测 t1
+# step 2: 输入 [t0, t1]           → 预测 t2
+# step 3: 输入 [t0, t1, t2]       → 预测 t3
+# ...
+</code></pre>
+<p><strong>每步输出的新 token 追加到序列末尾，成为下一步的输入</strong>。这就是&quot;自回归&quot;。
+模型本身不变，KV Cache 只是让上面循环更快（复用已算的 K/V），不改变自回归的语义。</p>
+<hr />
+<h3>Q4: C 的演变路径 — vocab_size → n_embd → vocab_size</h3>
+<pre><code>输入 x: (B, T)        整数，值域 [0, vocab_size)，是 token ID
+
+token_embedding_table: nn.Embedding(vocab_size, n_embd)
+    = 一张可学习的查找表，形状 (vocab_size, n_embd)
+    token ID k → 取第 k 行 → n_embd 维向量
+
+经过 embedding 后: (B, T, n_embd)   C = n_embd = 64（不是 vocab_size！）
+
+经过若干 Block 变换: (B, T, n_embd)  形状不变，内容被逐步精炼
+
+lm_head: nn.Linear(n_embd, vocab_size)
+    将每个位置的 n_embd 维向量映射回 vocab_size 维的预测分数
+
+输出 logits: (B, T, vocab_size)   C = vocab_size，每个位置上每个字符的原始得分
+</code></pre>
+<p>映射&quot;规则&quot;：Embedding 矩阵随机初始化，通过反向传播学习。
+训练收敛后，语义相近的 token 在 n_embd 维空间中自然聚集（这是涌现出来的，不是人为设计的）。</p>
+<hr />
+<h3>Q5: Multi-head — 用多个独立视角同时观察同一个序列</h3>
+<p><strong>单头的局限</strong>：一个 n_embd 维的注意力头，把所有语义关系压缩成一种模式，无法同时学习&quot;语法结构&quot;和&quot;指代关系&quot;等不同维度的依赖。</p>
+<p><strong>多头的做法</strong>：把 n_embd 切分成 n_head 份，每份（head_size 维）独立计算 attention，最后拼接。</p>
+<pre><code>n_embd=64, n_head=4, head_size=16
+
+Head 0: 在 16 维子空间 → 学习某种依赖模式（如短距离语法）
+Head 1: 在 16 维子空间 → 学习另一种模式（如指代关系）
+Head 2: ...
+Head 3: ...
+
+concat: 4 × 16 = 64 维
+proj (Linear 64→64): 混合各头信息，输出仍为 n_embd=64
+</code></pre>
+<p>参数总量与单头相同（n_head × head_size = n_embd），但信息被<strong>分流到多个独立的注意力视角</strong>中并行处理。</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

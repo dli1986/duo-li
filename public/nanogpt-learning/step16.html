@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 16 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class="active"><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step15.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 16 / 20</span>
+      <a href="step17.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">16</span>Sample Next Token</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1100 300" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step16.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep16(ctx, 1100, 300);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">One character drawn from the distribution, weighted by probability</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">idx_next = torch.multinomial(probs, num_samples=1)   # (B, 1)</code>
+    <div class="shape-line"><span class="tag">(B,65)</span> → <span class="tag">(B,1)</span></div>
+    <p>Not argmax by default — a genuine weighted random draw, so the same prompt can produce different continuations across runs. This sampled id is exactly what step 14 needs to know before it can compute the <i>next</i> position's embedding — the root of the causal chain.</p>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>generate()</b> (gpt-dev.ipynb)</span><span>same method, the sampling line</span></div>
+    <pre>def generate(self, idx, max_new_tokens):
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -block_size:]
+            logits, loss = self(idx_cond)
+            logits = logits[:, -1, :]
+            probs = F.softmax(logits, dim=-1)
+<span class="hl">            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)</span>
+            idx = torch.cat((idx, idx_next), dim=1)
+        return idx</pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>PyTorch internals:</b> <code class="inline">torch.multinomial(probs, num_samples=1)</code> draws one index per batch row from the categorical distribution defined by that row's probabilities — internally it builds a cumulative distribution and does inverse-transform sampling using the device's random number generator. This is the only <i>non-deterministic</i> operation in the whole forward path (everything else is deterministic given fixed weights).</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>8119b626</code></summary>
+      <div class="hl-code"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">BigramLanguageModel</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="c1"># each token directly reads off the logits for the next token from a lookup table</span>
+        <span class="c1"># 将vocab_size个字符映射到n_embd维的向量空间中</span>
+        <span class="c1"># 输入xb和yb是形状为(B,T)的整数张量，输出是形状为(B,T,C)的浮点数张量，其中C是内部的维度n_embd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">token_embedding_table</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="n">vocab_size</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">)</span>
+        <span class="c1"># 位置向量的计算基于sequence的长度T，所以输入是一个长度为T的整数张量，输出是一个形状为(T,C)的浮点数张量</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">position_embedding_table</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="n">block_size</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">)</span>
+        <span class="c1"># 因为作为基本transformer单元的Block输出形状是B,T,n_embd，所以输入也是B,T,n_embd，输出也是B,T,n_embd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">blocks</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="o">*</span><span class="p">[</span><span class="n">Block</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">n_head</span><span class="o">=</span><span class="n">n_head</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_layer</span><span class="p">)])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ln_f</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">LayerNorm</span><span class="p">(</span><span class="n">n_embd</span><span class="p">)</span> <span class="c1"># final layer norm</span>
+        <span class="c1"># 将B,T,n_embd维的表示映射回vocab_size维的空间中，得到每个位置上每个字符的预测分数,变成B,T,vocab_size的形状</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">lm_head</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">vocab_size</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> <span class="n">targets</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="n">B</span><span class="p">,</span> <span class="n">T</span> <span class="o">=</span> <span class="n">idx</span><span class="o">.</span><span class="n">shape</span>
+
+        <span class="c1"># idx and targets are both (B,T) tensor of integers，we pass them through the model to produce logits, which are (B,T,vocab_size) tensor of floats</span>
+        <span class="c1"># 输入来自xb和yb是形状为(B,T)的整数张量</span>
+        <span class="n">tok_emb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">token_embedding_table</span><span class="p">(</span><span class="n">idx</span><span class="p">)</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">pos_emb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">position_embedding_table</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">T</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">))</span> <span class="c1"># (T,C)</span>
+        <span class="c1"># 这里的广播机制会将pos_emb从(T,C)扩展到(B,T,C)，使得每个序列位置都有一个对应的嵌入向量</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">tok_emb</span> <span class="o">+</span> <span class="n">pos_emb</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">blocks</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,C)  之前被误注释掉，导致 attention/FFN 完全不生效，这里改正</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ln_f</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">logits</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">lm_head</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,vocab_size)</span>
+
+        <span class="k">if</span> <span class="n">targets</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">B</span><span class="p">,</span> <span class="n">T</span><span class="p">,</span> <span class="n">C</span> <span class="o">=</span> <span class="n">logits</span><span class="o">.</span><span class="n">shape</span>
+            <span class="n">logits</span> <span class="o">=</span> <span class="n">logits</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">B</span><span class="o">*</span><span class="n">T</span><span class="p">,</span> <span class="n">C</span><span class="p">)</span>
+            <span class="n">targets</span> <span class="o">=</span> <span class="n">targets</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">B</span><span class="o">*</span><span class="n">T</span><span class="p">)</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">cross_entropy</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">targets</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">logits</span><span class="p">,</span> <span class="n">loss</span>
+
+    <span class="c1"># generate</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> <span class="n">max_new_tokens</span><span class="p">):</span>
+        <span class="c1"># idx is (B, T) array of indices in the current context</span>
+        <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">max_new_tokens</span><span class="p">):</span>
+            <span class="c1"># crop idx to the last block_size tokens</span>
+            <span class="n">idx_cond</span> <span class="o">=</span> <span class="n">idx</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size</span><span class="p">:]</span>
+            <span class="c1"># get the predictions</span>
+            <span class="n">logits</span><span class="p">,</span> <span class="n">loss</span> <span class="o">=</span> <span class="bp">self</span><span class="p">(</span><span class="n">idx_cond</span><span class="p">)</span>
+            <span class="c1"># focus only on the last time step</span>
+            <span class="n">logits</span> <span class="o">=</span> <span class="n">logits</span><span class="p">[:,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span> <span class="c1"># becomes (B, C)</span>
+            <span class="c1"># apply softmax to get probabilities</span>
+            <span class="n">probs</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, C)</span>
+            <span class="c1"># sample from the distribution</span>
+            <span class="n">idx_next</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">multinomial</span><span class="p">(</span><span class="n">probs</span><span class="p">,</span> <span class="n">num_samples</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, 1)</span>
+            <span class="c1"># append sampled index to the running sequence</span>
+            <span class="n">idx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">((</span><span class="n">idx</span><span class="p">,</span> <span class="n">idx_next</span><span class="p">),</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, T+1)</span>
+        <span class="k">return</span> <span class="n">idx</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+---
+title: "nanoGPT-learning"
+slug: "nanogpt-learning"
+status: "active"
+technologies:
+  - "Python"
+  - "PyTorch"
+  - "Jupyter"
+  - "Jinja2"
+summary: "A step-by-step, mobile-friendly walkthrough of Karpathy's nanoGPT architecture, generated from a Jupyter notebook and served as a static site."
+repository: "https://github.com/dli1986/nanoGPT-learning"
+demoUrl: "/nanogpt-learning/"
+order: 5
+---
+
+## Overview
+
+A static, one-page-per-step walkthrough of the nanoGPT / transformer pipeline — tokenizer, embeddings, attention, transformer blocks, all the way to logits. Each step pairs an English explanation with the exact current Jupyter notebook source and Chinese-language deep-dive notes, generated at build time so the site never drifts from the notebook.
+
+## Topics
+
+- Tokenization and batch assembly
+- Token and position embeddings
+- Single-head and multi-head attention
+- Transformer blocks stacked into a full model
+- Final layer norm and language modeling head
+
+## Lessons Learned
+
+Rebuilding diagrams as inline SVG (rather than replaying canvas draw calls client-side) made the content actually readable on mobile — the original desktop-sized canvas diagrams shrank to unreadable text when scaled down.
+
+## Roadmap
+
+Continuing on to llama2.c as the next step after nanoGPT, using this same walkthrough format.

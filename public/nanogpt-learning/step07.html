@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 7 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class="active"><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step06.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 7 / 20</span>
+      <a href="step08.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">7</span>Multi-Head: Concat + Project</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1150 700" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step07.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep7(ctx, 1150, 700);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">Real 2-head values from your notebook (cell 5f251a53); your trained config uses 4 heads of 16 each</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+out = torch.cat([h(x) for h in self.heads], dim=-1)
+out = self.proj(out)   # Linear(num_heads*head_size, n_embd)</code>
+    <div class="shape-line">n_head=4 × <span class="tag">(B,T,16)</span> → cat → <span class="tag">(B,T,64)</span> → proj → <span class="tag">(B,T,64)</span></div>
+    <p>n_embd=64 splits into 4 independent 16-dim subspaces, each learning a different relational pattern, then remixed by <code class="inline">proj</code>. Your <code class="inline">Head</code>/<code class="inline">MultiHeadAttention</code> code loops over heads in Python and concatenates — mathematically equivalent to (but not literally) a batched 4D <code class="inline">(B,n_head,T,head_size)</code> tensor.</p>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>MultiHeadAttention</b> class (gpt-dev.ipynb)</span><span>wraps n_head independent Head instances</span></div>
+    <pre>class MultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+<span class="hl">        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])</span>
+        self.proj = nn.Linear(num_heads * head_size, n_embd)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x):
+<span class="hl">        out = torch.cat([h(x) for h in self.heads], dim=-1) # (B,T,n_head*head_size)</span>
+<span class="hl">        out = self.dropout(self.proj(out)) # back to (B,T,n_embd)</span>
+        return out</pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>PyTorch internals:</b> <code class="inline">nn.ModuleList</code> is a plain Python list <i>that PyTorch also knows how to walk</i> — each <code class="inline">Head</code> inside it gets correctly registered so its parameters show up in <code class="inline">.parameters()</code> and it moves with <code class="inline">.to(device)</code>; a raw Python list of modules would silently hide them from the optimizer. <code class="inline">torch.cat(..., dim=-1)</code> concatenates along the last axis — 4 tensors of <code class="inline">(B,T,16)</code> become one <code class="inline">(B,T,64)</code>, a pure memory-layout operation, no computation.</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>1177f3ef</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># 继承上面的单头自注意力，构建多头自注意力</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">MultiHeadAttention</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">num_heads</span><span class="p">,</span> <span class="n">head_size</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="c1"># 这里将多个heads重新组合成一个多头自注意力层，每个head都会独立地计算自己的query、key、value向量，并且在最后将它们的输出拼接起来，得到一个新的表示，这个表示包含了输入数据中捕捉到的多个特定模式或关系的信息</span>
+        <span class="c1"># 现在的形状是num_heads个head_size维的表示，最后我们会将它们拼接起来，得到一个新的n_embd维的表示，这个表示包含了输入数据中捕捉到的多个特定模式或关系的信息</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">heads</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">ModuleList</span><span class="p">([</span><span class="n">Head</span><span class="p">(</span><span class="n">head_size</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_heads</span><span class="p">)])</span>
+        <span class="c1"># 为什么命名是proj，它是projection（投影的意思）的简写，表示映射回n_embd维的空间中，得到一个新的表示</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">proj</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">num_heads</span> <span class="o">*</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dropout</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Dropout</span><span class="p">(</span><span class="mf">0.1</span><span class="p">)</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">out</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="n">h</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">h</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">heads</span><span class="p">],</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># 将多个head的输出拼接起来，得到一个新的表示，这个表示包含了输入数据中捕捉到的多个特定模式或关系的信息</span>
+        <span class="n">out</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dropout</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">proj</span><span class="p">(</span><span class="n">out</span><span class="p">))</span> <span class="c1"># 将拼接后的表示映射回n_embd维的空间中，得到一个新的表示，这个表示包含了输入数据中捕捉到的多个特定模式或关系的信息</span>
+        <span class="c1"># 现在形状是B,T,n_embd</span>
+        <span class="k">return</span> <span class="n">out</span> 
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>bbdcc75b</code></summary>
+      <p>import torch
+import torch.nn as nn
+import torch.nn.functional as F</p>
+<h1>Multi-head 切分 n_embd 为独立子空间 + 正确 attention 公式 + KV Cache 原理</h1>
+<p>torch.manual_seed(0)
+n_embd_demo = 8
+n_head_demo = 4
+head_size   = n_embd_demo // n_head_demo  # = 2</p>
+<p>print(f&quot;n_embd={n_embd_demo}  n_head={n_head_demo}  head_size={head_size}&quot;)</p>
+<p>B, T = 1, 5
+x = torch.randn(B, T, n_embd_demo)
+print(f&quot;输入 x: {x.shape}  (B={B}, T={T} 个 token)\n&quot;)</p>
+<h1>权重矩阵：推理时固定，等价于 nn.Linear(n_embd, head_size, bias=False).weight.T</h1>
+<p>W_q = torch.randn(n_embd_demo, head_size)
+W_k = torch.randn(n_embd_demo, head_size)
+W_v = torch.randn(n_embd_demo, head_size)</p>
+<h1>── 方式1：无 KV Cache，一次并行处理全部 T 个 token ─────────────────</h1>
+<h1>注：这只是&quot;计算形状&quot;和训练一次前向传播相同（多位置并行），实际没有 backward/optimizer，仍然是推理</h1>
+<p>print(&quot;=== 推理（无 KV Cache，朴素重算）：全部 T 个 token 一次并行 ===&quot;)
+q = x @ W_q   # (B, T, head_size)
+k = x @ W_k
+v = x @ W_v</p>
+<h1>正确公式：先缩放再 softmax，最后聚合 value（不能省略 softmax 直接乘 v）</h1>
+<p>wei = q @ k.transpose(-2, -1) * head_size**-0.5   # (B, T, T) 相似度分数
+wei = F.softmax(wei, dim=-1)                       # (B, T, T) 归一化为概率
+out_full = wei @ v                                 # (B, T, head_size) 加权聚合
+print(f&quot;  q/k/v: {q.shape}  →  out: {out_full.shape}\n&quot;)</p>
+<h1>── 方式2：推理时逐 token，KV Cache 追加，Q 当步用完即丢 ─────────────</h1>
+<p>print(&quot;=== 推理 + KV Cache：Q 不缓存，K/V 逐步追加历史 ===&quot;)
+k_cache = torch.zeros(B, 0, head_size)
+v_cache = torch.zeros(B, 0, head_size)</p>
+<p>for t in range(T):
+x_new = x[:, t:t+1, :]                              # (B, 1, n_embd) 当前新 token</p>
+<pre><code>q_new = x_new @ W_q                                  # (B, 1, head_size) 当前 token 提问，用完即丢
+k_new = x_new @ W_k                                  # (B, 1, head_size) 追加进 cache
+v_new = x_new @ W_v                                  # (B, 1, head_size) 追加进 cache
+
+k_cache = torch.cat([k_cache, k_new], dim=1)         # cache 增长为 (B, t+1, head_size)
+v_cache = torch.cat([v_cache, v_new], dim=1)
+
+wei_new = q_new @ k_cache.transpose(-2, -1) * head_size**-0.5  # (B, 1, t+1)
+wei_new = F.softmax(wei_new, dim=-1)
+out_new = wei_new @ v_cache                                      # (B, 1, head_size)
+
+print(f&quot;  step {t}: Q {q_new.shape} 用完丢弃 | K/V cache {k_cache.shape} | out {out_new.shape}&quot;)
+</code></pre>
+<p>print(f&quot;\n为什么只缓存 K/V，不缓存 Q:&quot;)
+print(f&quot;  K/V = '历史 token 提供的答案'，每步追加 1 条，对未来所有 step 仍然有效&quot;)
+print(f&quot;  Q   = '当前 token 的提问'，   每步只有 1 个问题，用完对下一步毫无用处&quot;)</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

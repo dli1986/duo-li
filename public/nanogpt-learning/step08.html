@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 8 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class="active"><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step07.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 8 / 20</span>
+      <a href="step09.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">8</span>Transformer Block</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1100 630" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step08.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep8(ctx, 1100, 630);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">Same shape in and out — residual bypass guarantees gradient never fully vanishes. Below: "俯视" view — ln2+ffwd is the one point where BOTH batch and position are isolated</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">x = x + self.sa(self.ln1(x))     # residual + Pre-Norm + attention
+x = x + self.ffwd(self.ln2(x))   # residual + Pre-Norm + feedforward</code>
+    <div class="shape-line"><span class="tag">(B,T,64)</span> in → <span class="tag">(B,T,64)</span> out, unchanged</div>
+    <p><b>Pre-Norm</b> (normalize before the sublayer, not after) — more stable than the original Transformer paper. <b>Residual</b> (<code class="inline">x + sublayer(x)</code>, not just <code class="inline">sublayer(x)</code>) guarantees <code class="inline">∂loss/∂x</code> keeps a "+1" direct path, so gradients survive 4 stacked Blocks. Attention = tokens exchange info; FeedForward (64→256→64) = each position independently "thinks alone" — FFN holds ~2/3 of the model's parameters.</p>
+    
+    <div class="aside normal"><b>ln2 + ffwd are more isolated than attention, not just "also independent."</b> Attention has exactly one cross-position moment (<code class="inline">q@k.T</code>). FFN and LayerNorm have <b>zero</b> — every <code class="inline">(b,t)</code> cell's output depends only on that cell's own input, full stop. Mechanically, <code class="inline">FeedForward</code>'s matmul <code class="inline">x @ W</code> contracts the <b>n_embd</b> dimension (features), not T — unlike <code class="inline">q@k.T</code>, which contracts head_size <i>specifically so T can interact with itself</i>. Same shape of operation (a matmul), completely different purpose: one produces cross-position relationships, the other never touches them. Batching B and T together here is <b>pure GPU efficiency</b> — the same weights applied to many unrelated inputs at once — not a real data dependency the way attention's batching is.</div>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>FeedForward</b> + <b>Block</b> classes (gpt-dev.ipynb)</span><span>Block wraps one attention round + one FFN round</span></div>
+    <pre>class FeedForward(nn.Module):
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(0.1),
+        )
+    def forward(self, x):
+        return self.net(x)
+
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa    = MultiHeadAttention(n_head, head_size)
+        self.ffwd  = FeedForward(n_embd)
+        self.ln1   = nn.LayerNorm(n_embd)
+        self.ln2   = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+<span class="hl">        x = x + self.sa(self.ln1(x))     # residual + Pre-Norm + attention</span>
+<span class="hl">        x = x + self.ffwd(self.ln2(x))   # residual + Pre-Norm + feedforward</span>
+        return x</pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>PyTorch internals:</b> <code class="inline">nn.LayerNorm(n_embd)</code> keeps two small learnable vectors, <code class="inline">weight</code> and <code class="inline">bias</code>, each shape <code class="inline">(n_embd,)</code>; its forward normalizes each position's 64-dim vector to mean 0/var 1 <i>then</i> rescales by <code class="inline">weight</code> and shifts by <code class="inline">bias</code> — so "normalize" doesn't mean "no longer learnable". <code class="inline">nn.Sequential</code> in <code class="inline">FeedForward</code> just chains the 4 sub-modules' <code class="inline">forward()</code> calls in list order, nothing more.</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>87af9589</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># feedforward network</span>
+<span class="c1"># 怎么理解feedforward network呢？它是一个简单的两层全连接网络，输入是n_embd维的表示，输出也是n_embd维的表示，中间有一个非线性激活函数，这个网络的作用是对输入的表示进行进一步的变换和处理，捕捉输入数据中更复杂的模式或关系的信息</span>
+<span class="c1"># feed的意思是前馈的，forward的意思是前向的，feedforward network就是一个前馈神经网络，表示信息在网络中是单向流动的，没有循环或反馈连接，这种网络结构使得它非常适合于处理固定大小的输入和输出，例如在自然语言处理任务中，输入是一段文本，输出是对文本的理解或生成结果</span>
+<span class="c1"># 承接上面的多头输出的n_embd维的表示，feedforward network会对这个表示进行进一步的变换和处理，捕捉输入数据中更复杂的模式或关系的信息，这些信息对于模型的预测任务是有用的</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">FeedForward</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">net</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span>
+            <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="mi">4</span> <span class="o">*</span> <span class="n">n_embd</span><span class="p">),</span> <span class="c1"># 将输入的n_embd维的表示映射到一个更高维的空间中，得到一个新的表示，这个表示包含了输入数据中更复杂的模式或关系的信息</span>
+            <span class="n">nn</span><span class="o">.</span><span class="n">ReLU</span><span class="p">(),</span> <span class="c1"># 非线性激活函数，增加模型的表达能力，使得模型能够捕捉输入数据中更复杂的模式或关系的信息</span>
+            <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="mi">4</span> <span class="o">*</span> <span class="n">n_embd</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">),</span> <span class="c1"># 将高维空间中的表示映射回n_embd维的空间中，得到一个新的表示，这个表示包含了输入数据中更复杂的模式或关系的信息</span>
+            <span class="n">nn</span><span class="o">.</span><span class="n">Dropout</span><span class="p">(</span><span class="mf">0.1</span><span class="p">),</span> <span class="c1"># dropout层，防止过拟合</span>
+        <span class="p">)</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">net</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+</pre></div>
+
+    </details>
+    
+    <details >
+      <summary>cell <code>3f1a1809</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># 前馈网络也属于前向传播的一部分，因此在多头self-attention层之后，我们会将多头自注意力层的输出传递给前馈网络，进行进一步的变换和处理，捕捉输入数据中更复杂的模式或关系的信息，这些信息对于模型的预测任务是有用的</span>
+<span class="c1"># Block是Transformer模型中的一个基本组成部分，它包含了一个多头自注意力层和一个前馈网络，这两个组件都是前向传播的一部分，负责对输入数据进行变换和处理，捕捉输入数据中更复杂的模式或关系的信息，这些信息对于模型的预测任务是有用的</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Block</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">,</span> <span class="n">n_head</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="n">head_size</span> <span class="o">=</span> <span class="n">n_embd</span> <span class="o">//</span> <span class="n">n_head</span>
+        <span class="c1"># sa 代表self-attention，ffwd代表feedforward network</span>
+        <span class="c1"># 形状是 B,T,n_embd n_embd = n_head * head_size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sa</span> <span class="o">=</span> <span class="n">MultiHeadAttention</span><span class="p">(</span><span class="n">n_head</span><span class="p">,</span> <span class="n">head_size</span><span class="p">)</span>
+        <span class="c1"># 形状是 B,T,n_embd，提升了模型的表达能力，使得模型能够捕捉输入数据中更复杂的模式或关系的信息</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ffwd</span> <span class="o">=</span> <span class="n">FeedForward</span><span class="p">(</span><span class="n">n_embd</span><span class="p">)</span>
+        <span class="c1"># 归一化层，规范化输入数据，稳定训练过程</span>
+        <span class="c1"># 归一化不影响形状，输入和输出的形状都是B,T,n_embd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ln1</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">LayerNorm</span><span class="p">(</span><span class="n">n_embd</span><span class="p">)</span> <span class="c1"># layer normalization层，规范化输入数据，稳定训练过程</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ln2</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">LayerNorm</span><span class="p">(</span><span class="n">n_embd</span><span class="p">)</span> <span class="c1"># layer normalization层，规范化输入数据，稳定训练过程</span>
+    
+    <span class="c1"># x的形状是B,T,n_embd，输出的形状也是B,T,n_embd</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="c1"># 这里需要理解，因为Block已经是transformer的基本单位了，所以Block=&gt;MultiHeadAttention+FeedForward+LayerNorm+残差连接，这些都是Transformer模型中的基本组件和机制</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">x</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">sa</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ln1</span><span class="p">(</span><span class="n">x</span><span class="p">))</span> <span class="c1"># 将多头自注意力层的输出与输入进行残差连接，得到一个新的表示，这个表示包含了输入数据中捕捉到的多个特定模式或关系的信息</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">x</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">ffwd</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ln2</span><span class="p">(</span><span class="n">x</span><span class="p">))</span> <span class="c1"># 将前馈网络的输出与输入进行残差连接，得到一个新的表示，这个表示包含了输入数据中捕捉到的更复杂的模式或关系的信息</span>
+        <span class="k">return</span> <span class="n">x</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>508596c5</code></summary>
+      <hr />
+<h2>Block 解析：两行代码背后的三个设计决策</h2>
+<pre><code class="language-python">def forward(self, x):           # x: (B, T, n_embd)
+    x = x + self.sa(self.ln1(x))    # 第一行
+    x = x + self.ffwd(self.ln2(x))  # 第二行
+    return x                    # 形状不变，仍是 (B, T, n_embd)
+</code></pre>
+<h3>决策 1：残差连接（Residual Connection）— <code>x = x + sublayer(x)</code> 而不是 <code>x = sublayer(x)</code></h3>
+<p><strong>问题</strong>：深层网络（4个Block叠加 = 8次线性变换）梯度反向传播时会连乘缩小趋近于0，参数无法更新。</p>
+<p><strong>解法</strong>：加法 <code>x + sublayer(x)</code> 让梯度直接&quot;跳过&quot;子层流回去：</p>
+<pre><code>∂loss/∂x = ∂loss/∂output × (1 + ∂sublayer/∂x)
+                                 ↑
+                          这个 1 确保梯度不会消失
+</code></pre>
+<p><strong>直觉</strong>：sublayer 只需要学习&quot;需要改变什么&quot;（delta），而不是&quot;完整的新表示&quot;。
+如果什么都不需要改变，sublayer 的输出趋近于 0，x 直通到下一层。</p>
+<hr />
+<h3>决策 2：LayerNorm（在子层之前，Pre-Norm）— <code>self.ln1(x)</code></h3>
+<p>将每个位置的 n_embd 维向量标准化到均值≈0、方差≈1。</p>
+<p><strong>为什么需要</strong>：n_layer 个 Block 叠加后，激活值的数值范围容易越来越大或越来越小。
+LayerNorm 在每次进入子层前&quot;归零&quot;，让每层都在相对稳定的数值范围内学习。</p>
+<p>注意：这是 Pre-Norm（先 norm 再 sublayer），比原论文的 Post-Norm 训练更稳定。</p>
+<hr />
+<h3>决策 3：FeedForward 放在 Attention 之后 — 两种互补的操作</h3>
+<pre><code>Self-Attention:   跨位置聚合信息    每个 token &quot;问&quot; 其他 token
+                  信息在 T 个位置之间流动
+
+FeedForward:      位置内独立变换    每个 token &quot;自己思考&quot;
+                  n_embd → 4×n_embd → n_embd
+                  位置之间完全独立，互不影响
+</code></pre>
+<p><strong>类比</strong>：</p>
+<ul>
+<li>Attention = 一次讨论会（所有人交换信息）</li>
+<li>FFN = 各自回去独立写报告（消化吸收，提升表达能力）</li>
+</ul>
+<p>4× 扩展的作用：给每个位置足够大的&quot;工作空间&quot;来做非线性变换，学习更复杂的模式。
+FFN 的参数量占整个模型的约 2/3，它是真正&quot;存储知识&quot;的地方（attention 更多是&quot;路由&quot;）。</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

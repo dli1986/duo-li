@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 2 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class="active"><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step01.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 2 / 20</span>
+      <a href="step03.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">2</span>Batch Assembly — <code class="inline">get_batch()</code></h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1300 800" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step02.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep2(ctx, 1300, 800);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">Each ix marks WHERE in the raw stream a window starts — arrows point to the EXACT cell that window lands in, and a bracket shows the full block_size span it covers</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">ix = torch.randint(len(data)-block_size, (batch_size,))
+x = torch.stack([data[i:i+block_size] for i in ix])</code>
+    <div class="shape-line"><span class="tag">(N,)</span> → <span class="tag">(B=16, T=32)</span></div>
+    <p><b>B independent, randomly-sampled windows</b> — the box's height axis (Batch) shows separate layers that never touch or mix; this isolation holds true through <i>every</i> step of this entire page. Each layer's width (Sequence, <b>T=32</b> in your real config) is how long this window is — starting next step, we'll also call it "position" (which slot within the window).</p>
+    
+    <div class="aside normal"><b>One batch = B parallel samples, drawn ALL AT ONCE.</b> <code class="inline">ix = torch.randint(..., (batch_size,))</code> is <i>one single call</i> that returns <code class="inline">batch_size</code> random integers together — <code class="inline">ix[0], ix[1], ix[2]</code> above are 3 <b>simultaneous</b> draws from that one call, not 3 separate training steps. This diagram shows exactly <b>one</b> <code class="inline">get_batch()</code> call. What repeated <i>calls</i> (i.e. many training steps, each with a brand-new random <code class="inline">ix</code>) accomplish over time — eventually touching most of the dataset — is a completely different question, answered below.</div>
+    
+    <div class="aside evidence"><b>Real captured output, your notebook:</b> "After 20 steps: 192 / 200 positions covered (96.0%)". This is NOT reproducible exactly (no random seed was set — yours will land on a different number), but the <i>pattern</i> always holds: fast coverage in the first few steps, then diminishing returns, approaching but rarely reaching 100% (there's always a slim chance some overlap-prone region gets missed). Play through the same simulation below — <b>every replay uses genuinely fresh randomness</b>, exactly like re-running the notebook cell.</div>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>get_batch()</b> (gpt-dev.ipynb)</span><span>called once per training step, and once per prefill</span></div>
+    <pre>batch_size = 16  # how many independent sequences will we process in parallel?
+block_size = 32  # what is the maximum context length for predictions?
+
+def get_batch(split):
+    # generate a small batch of data of inputs x and targets y
+    data = train_data if split == 'train' else val_data
+<span class="hl">    ix = torch.randint(len(data) - block_size, (batch_size,))</span>
+<span class="hl">    x = torch.stack([data[i:i+block_size] for i in ix])</span>
+    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x, y = x.to(device), y.to(device)
+    return x, y</pre>
+  </div>
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>ix 覆盖机制</b> coverage demo (gpt-dev.ipynb)</span><span>a DIFFERENT question: many calls over time, not one call</span></div>
+    <pre>N = 200          # 缩小版演示，代表原始 token 序列长度
+_block = 8
+_batch = 4
+n_steps = 20     # 模拟 20 次 get_batch 调用
+
+coverage = np.zeros(N)
+for step in range(n_steps):
+<span class="hl">    starts = np.random.randint(0, N - _block, size=_batch)   # a NEW random ix, every step</span>
+<span class="hl">    for s in starts:</span>
+<span class="hl">        coverage[s:s + _block] += 1</span>
+    # ...plot coverage as a bar chart...
+
+print(f"After {n_steps} steps: {(coverage &gt; 0).sum()} / {N} positions covered ({100*(coverage&gt;0).mean():.1f}%)")</pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>PyTorch internals:</b> <code class="inline">torch.randint</code> draws <code class="inline">batch_size</code> independent random integers on the CPU/GPU in one vectorized call (no Python loop). <code class="inline">torch.stack</code> then takes a Python list of <code class="inline">batch_size</code> separate 1D tensors (each length <code class="inline">block_size</code>) and allocates one new contiguous 2D tensor, copying each row in — this is where the <code class="inline">(B,T)</code> shape is physically created.</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>e756bf49</code></summary>
+      <div class="hl-code"><pre><span></span><span class="n">batch_size</span> <span class="o">=</span> <span class="mi">16</span> <span class="c1"># how many independent sequences will we process in parallel?</span>
+<span class="n">block_size</span> <span class="o">=</span> <span class="mi">32</span> <span class="c1"># what is the maximum context length for predictions? i.e. how many characters do we feed into the model to get a prediction?</span>
+<span class="n">n_embd</span> <span class="o">=</span> <span class="mi">64</span> <span class="c1"># the dimensionality of the character embedding vectors</span>
+<span class="n">n_head</span> <span class="o">=</span> <span class="mi">4</span> <span class="c1"># the number of heads we&#39;d like in the self-attention layer</span>
+<span class="n">n_layer</span> <span class="o">=</span> <span class="mi">4</span> <span class="c1"># the number of layers we&#39;d like in the Transformer</span>
+<span class="n">dropout</span> <span class="o">=</span> <span class="mf">0.0</span> <span class="c1"># the dropout probability for the Transformer</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_batch</span><span class="p">(</span><span class="n">split</span><span class="p">):</span>
+    <span class="c1"># generate a small batch of data of inputs x and targets y</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">train_data</span> <span class="k">if</span> <span class="n">split</span> <span class="o">==</span> <span class="s1">&#39;train&#39;</span> <span class="k">else</span> <span class="n">val_data</span>
+    <span class="n">ix</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randint</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span> <span class="o">-</span> <span class="n">block_size</span><span class="p">,</span> <span class="p">(</span><span class="n">batch_size</span><span class="p">,))</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">:</span><span class="n">i</span><span class="o">+</span><span class="n">block_size</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">ix</span><span class="p">])</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="o">+</span><span class="mi">1</span><span class="p">:</span><span class="n">i</span><span class="o">+</span><span class="n">block_size</span><span class="o">+</span><span class="mi">1</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">ix</span><span class="p">])</span>
+    <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">),</span> <span class="n">y</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>6da58823</code></summary>
+      <h2>ix 的覆盖机制</h2>
+<p><code>ix</code> 不是&quot;一次性扫描全部&quot;，而是靠<strong>随机采样 + 多次迭代</strong>来统计覆盖整个数据集。</p>
+<pre><code>原始 1D token 序列（长度 N ≈ 100万）:
+[0, 1, 2, 3, ......................., N-1]
+
+第1次 get_batch → ix = [42, 1800, 55000, 3]   → 采样4个起点（示意，实际是 batch_size 个）
+第2次 get_batch → ix = [201, 9900, 77, 40000] → 又采样4个起点
+...
+第10000次               → 经过足够多次后，整个序列都被随机触及过
+
+每个起点各自的窗口宽度 = block_size（比如 32）——batch_size 只决定&quot;一次采几个这样的窗口&quot;，
+不会让单个窗口变宽；batch_size 个窗口是并行、各自独立的，不是拼接成一个更宽的窗口。
+
+第1次 get_batch 的 4 个起点，各自覆盖:
+  data[42    : 42+32]     ← 宽度 32
+  data[1800  : 1800+32]   ← 宽度 32
+  data[55000 : 55000+32]  ← 宽度 32
+  data[3     : 3+32]      ← 宽度 32
+
+这一次调用总共覆盖的 token 数（batch_size 个独立窗口的宽度之和）= batch_size × block_size = 16×32 = 512
+（这是&quot;不重叠情况下&quot;的总量，不是&quot;某一个起点自己&quot;覆盖的宽度）
+但训练跑 10000 步 → 理论上触及 5,120,000 个位置（含重叠）
+</code></pre>
+<p>关键约束：上界是 <code>len(data) - block_size</code> 而不是 <code>len(data)</code>，
+是为了防止 <code>data[i : i+block_size]</code> 末尾越界。</p>
+<hr />
+<h3>&quot;训练跑 10000 步&quot; 里的&quot;步&quot;，是不是就是&quot;采样 ix 的次数&quot;</h3>
+<p><strong>在本 notebook 这种最朴素的训练循环里，是的，一一对应</strong>：</p>
+<pre><code class="language-python">for steps in range(10000):
+    xb, yb = get_batch('train')   # 采样一次 ix → 一次前向 → 一次反向 → 一次 optimizer.step()
+    logits, loss = m(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+</code></pre>
+<p>每一次 for 循环，<code>get_batch</code>（采样 ix）、<code>loss.backward()</code>（算梯度）、<code>optimizer.step()</code>（更新权重）都只发生一次，
+所以&quot;训练步数&quot;=&quot;ix 采样次数&quot;=&quot;权重更新次数&quot;，三者严格相等——<strong>但这个等式只在没有梯度累积的前提下成立</strong>。</p>
+<p><strong>真实训练常见的做法是梯度累积（gradient accumulation）</strong>，此时三者会分离：</p>
+<pre><code class="language-python">optimizer.zero_grad()
+for micro_step in range(accum_steps):      # 比如 accum_steps=4
+    xb, yb = get_batch('train')            # 每个 micro_step 都采样一次新 ix
+    logits, loss = m(xb, yb)
+    loss.backward()                        # 梯度累加，但先不更新权重
+optimizer.step()                           # 累积 4 次 micro_step 后，才真正更新一次权重
+</code></pre>
+<p>这种情况下：<strong>&quot;1 个训练 step&quot;（1 次 <code>optimizer.step()</code>）对应了 <code>accum_steps</code> 次 ix 采样</strong>，
+不再是一一对应。这么做的常见原因是：单张 GPU 显存放不下想要的大 batch_size，
+于是把一个&quot;大 batch&quot;拆成几个&quot;小 batch（micro-batch）&quot;分别算梯度、累加起来，再当作一次大 batch 的效果去更新权重。</p>
+<hr />
+<h3>校正：训练时 T 是否恒等于 block_size——是的，且不需要 padding</h3>
+<p><code>ix = torch.randint(len(data) - block_size, (batch_size,))</code> 的采样上界就是 <code>len(data) - block_size</code>，
+这保证了<strong>每一次采样出来的 <code>i</code>，<code>data[i:i+block_size]</code> 都必然是完整的 block_size 长度</strong>，不存在越界、也不存在&quot;最后一批需要补齐 padding&quot;的情况——
+因为 <code>get_batch</code> 是<strong>有放回的随机采样</strong>，不是按顺序切分数据集，不会出现&quot;数据集切到最后不够凑成一批&quot;的场景。</p>
+<p>结论：<strong>训练时 T 严格恒等于 block_size，每一步都不例外</strong>；这也意味着 <code>position_embedding_table</code> 的 <code>block_size</code> 行，训练时每一步都会被查全（<code>torch.arange(T)</code> 里 T=block_size）。</p>
+<p>但这只是<strong>训练这套 get_batch 实现下的数值巧合</strong>，不代表 T（sequence size）和 block_size 是同一个概念可以合并——
+<code>Head.forward()</code> 里写的是通用的 <code>B,T,C = x.shape</code>，没有写死 T=block_size，这正是同一份代码在推理阶段（T 从 1 到 block_size 之间任意取值，包括 KV Cache 每步 T=1）也能正确工作的原因。</p>
+
+    </details>
+    
+    <details >
+      <summary>note <code>32ba12ef</code></summary>
+      <p>import matplotlib.pyplot as plt
+import numpy as np</p>
+<p>N = 200          # 用缩小版演示，代表原始 token 序列长度
+_block = 8
+_batch = 4
+n_steps = 20     # 模拟 20 次 get_batch 调用</p>
+<p>coverage = np.zeros(N)
+fig, axes = plt.subplots(n_steps // 5, 5, figsize=(14, 6))
+axes = axes.flatten()</p>
+<p>for step in range(n_steps):
+starts = np.random.randint(0, N - _block, size=_batch)
+for s in starts:
+coverage[s:s + _block] += 1
+ax = axes[step]
+ax.bar(range(N), (coverage &gt; 0).astype(int), color='steelblue', width=1)
+ax.set_title(f'step {step+1}', fontsize=8)
+ax.set_ylim(0, 1.2)
+ax.axis('off')</p>
+<p>plt.suptitle(f'Coverage grows with training steps  (N={N}, block={_block}, batch={_batch})', fontsize=11)
+plt.tight_layout()
+plt.show()
+print(f&quot;After {n_steps} steps: {(coverage &gt; 0).sum()} / {N} positions covered ({100*(coverage&gt;0).mean():.1f}%)&quot;)</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

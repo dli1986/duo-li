@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 6 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class="active"><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step05.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 6 / 20</span>
+      <a href="step07.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">6</span>Single-Head Attention</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1450 910" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step06.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep6(ctx, 1450, 910);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">Two real static 3D boxes: (B,T,C) in blue → (T,head_size) in gold, visibly thinner (B fixed to 1) → Q (real) and K transposed (illustrative pattern, own weights) side by side → real 3×3 wei_raw = Q@K.T (notebook cell 21), asymmetric pair highlighted</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">k=self.key(x); q=self.query(x); v=self.value(x)     # ①②③ still independent
+wei = q @ k.transpose(-2,-1) * head_size**-0.5      # ④ independence BREAKS here
+wei = wei.masked_fill(tril==0, float('-inf'))        # ⑤ constrains range
+wei = F.softmax(wei, dim=-1)                         # ⑥ normalizes only
+out = wei @ v                                        # ⑦ content actually mixes</code>
+    <div class="shape-line"><span class="tag">C=8→head_size=4</span> (1st matmul) → <span class="tag">head_size=4→scalar</span> (2nd matmul) → <span class="tag">head_size=4</span></div>
+    <p>Line ④ is the <b>only</b> line in the whole model where position t starts depending on other positions. Real proof from your notebook: <code class="inline">out[0]==v[0]</code> exactly (no history to see) vs <code class="inline">out[3]≠v[3]</code> (mixed history) — <code class="inline">torch.allclose</code> confirmed True / False respectively. q,k compress to a scalar then get discarded; <b>v survives as a vector</b> — v carries the real semantic content, not q/k.</p>
+    
+    <div class="aside normal"><b>wei is NOT symmetric.</b> A true Gram matrix (<code class="inline">X @ X.T</code>) would force <code class="inline">wei[i][j] == wei[j][i]</code> — but here <code class="inline">Q</code> and <code class="inline">K</code> come from <i>separate</i> learned weights (<code class="inline">Wq ≠ Wk</code>), so <code class="inline">wei[i][j] ≠ wei[j][i]</code> in general. Real proof, panel ③ below: <code class="inline">wei_raw[0][2] = -0.21</code> vs <code class="inline">wei_raw[2][0] = 0.09</code> — opposite sign, not just "slightly different." Picture the (T,T) table as a <b>directional relevance table</b> ("how much does t care about t'"), not a distance/similarity table.</div>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>Head</b> class (gpt-dev.ipynb)</span><span>one instance per head, 4 heads per Block</span></div>
+    <pre>class Head(nn.Module):
+    """ one head of self-attention """
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.key   = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x):
+        B,T,C = x.shape
+<span class="hl">        k = self.key(x)   # (B,T,head_size)          -- ①</span>
+<span class="hl">        q = self.query(x) # (B,T,head_size)          -- ②</span>
+<span class="hl">        v = self.value(x) # (B,T,head_size)          -- ③  (computed here, used in ⑦)</span>
+<span class="hl">        wei = q @ k.transpose(-2, -1) * head_size**-0.5  # (B,T,T) -- ④ independence BREAKS</span>
+<span class="hl">        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # -- ⑤</span>
+<span class="hl">        wei = F.softmax(wei, dim=-1)  # -- ⑥</span>
+        wei = self.dropout(wei)
+<span class="hl">        out = wei @ v  # (B,T,head_size)  -- ⑦ content actually mixes</span>
+        return out</pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>PyTorch internals:</b> <code class="inline">nn.Linear(n_embd, head_size, bias=False)</code> stores a <code class="inline">weight</code> of shape <code class="inline">(head_size, n_embd)</code> (PyTorch stores Linear weights <i>transposed</i> relative to the math) — calling it computes <code class="inline">x @ weight.T</code> internally. <code class="inline">register_buffer('tril', ...)</code> is how you attach a tensor to the module that moves with <code class="inline">.to(device)</code> and saves with <code class="inline">state_dict()</code>, but is <b>excluded</b> from <code class="inline">.parameters()</code> — the optimizer never touches it, exactly right for a fixed causal mask.</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>ad09a469</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># single head self attention</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Head</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot; one head of self-attention &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">head_size</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="c1"># 传承前面的input的维度，B,T,C(vocab_size--&gt;n_embd)，将n_embd维的输入映射到head_size维的空间中，得到query、key、value向量</span>
+        <span class="c1"># 收敛的时候，head_size维的query(16)、key(16)、value(16)向量会学会捕捉输入数据中的某些特定模式或关系，这些模式或关系对于模型的预测任务是有用的</span>
+        <span class="c1"># 结束后收敛回n_embd维的空间中,基于head_size维的query、key、value向量进行计算，得到一个新的n_embd维的表示，这个表示包含了输入数据中捕捉到的特定模式或关系的信息</span>
+        <span class="c1"># 最后在最后一层的lm_head中将n_embd维的表示映射回vocab_size维的空间中，得到每个位置上每个字符的预测分数</span>
+        <span class="c1"># 这里是真正的需要更新的参数，W_key,W_query,W_value是在nn.Linear中定义并被记录为参数的</span>
+        
+        <span class="c1"># self.key/query/value 是可学习的线性投影层。</span>
+        <span class="c1"># PyTorch 中每个 Linear 的 weight shape 是 (head_size, n_embd)，</span>
+        <span class="c1"># 但数学上等价于把输入 x 右乘一个 (n_embd, head_size) 的矩阵。</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">key</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">query</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="c1"># 基于block size和tril矩阵的mask，确保每个位置只能关注到它自己和它之前的位置，防止模型在训练过程中看到未来的信息</span>
+        
+        <span class="c1"># tril 是固定的 causal mask，不是可学习参数。</span>
+        <span class="c1"># register_buffer 让它跟随模型保存和移动设备，但不会被 optimizer 更新。</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">register_buffer</span><span class="p">(</span><span class="s1">&#39;tril&#39;</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">tril</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">block_size</span><span class="p">,</span> <span class="n">block_size</span><span class="p">)))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dropout</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Dropout</span><span class="p">(</span><span class="mf">0.1</span><span class="p">)</span>
+    
+    <span class="c1"># 前向传播函数，输入x的形状是(B,T,C)，输出是(B,T,head_size), 这里的C是n_embd</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">B</span><span class="p">,</span><span class="n">T</span><span class="p">,</span><span class="n">C</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">shape</span>
+        <span class="c1"># 通过线性变换得到key、query、value向量</span>
+        <span class="c1"># 这里有一个核心注意点是，在前向传播的时候这里的k,q,wei都是中间值，并不是参数</span>
+        <span class="c1"># 它们是动态计算得到的，基于输入数据x通过线性变换得到的，这些中间值会随着输入数据的不同而变化，并且在训练过程中会不断更新，以学习到更好的模式或关系</span>
+        <span class="c1"># 真正的参数是self.key、self.query、self.value这三个线性层的权重，这些权重会在训练过程中通过反向传播进行更新，以学习到更好的模式或关系</span>
+        <span class="c1"># 它们的形状是(head_size, n_embd)（PyTorch Linear 的 weight 约定），是固定的，而k,q,wei的形状是(B,T,head_size)和(B,T,T)，是动态的，随着输入数据的不同而变化</span>
+
+        <span class="c1"># q/k/v 是由输入 x 和可学习参数动态计算出的中间激活，不是模型参数。</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">key</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>   <span class="c1"># (B,T,head_size)</span>
+        <span class="n">q</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,head_size)</span>
+        <span class="c1"># 计算注意力分数</span>
+        <span class="c1"># 这里的tril矩阵应用还是和平均概率分布的mask一样，确保每个位置只能关注到它自己和它之前的位置，防止模型在训练过程中看到未来的信息</span>
+        <span class="c1"># 不同的是通过引入的k和q让模型在不看未来的前提下，不再是平均地关注之前的所有位置，而是根据输入数据中的模式或关系，学习到在不同位置上应该关注哪些之前的位置，这些位置对于模型的预测任务是有用的</span>
+
+        
+        <span class="c1"># attention logits: 每个 token 的 query 与所有 token 的 key 做相似度计算。</span>
+        <span class="c1"># 缩放因子用 1/sqrt(head_size)（不是 1/sqrt(n_embd)）。</span>
+
+        <span class="c1"># 真正排除未来 token 的不是 transpose，而是后面的 causal mask</span>
+        
+        <span class="c1"># q @ k.transpose(-2, -1)</span>
+
+        <span class="c1"># (B, T, head_size) @ (B, head_size, T)</span>
+        <span class="c1"># = (B, T, T)</span>
+
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">head_size</span><span class="o">**-</span><span class="mf">0.5</span> <span class="c1"># (B,T,head_size) @ (B,head_size,T) --&gt; (B,T,T)</span>
+        <span class="c1"># 这个tril矩阵的形状抛开batch size的话，是一个T*T的矩阵（T 是本次输入的实际序列长度，不是 block_size 本身——</span>
+        <span class="c1"># block_size 只是 register_buffer 时开的最大容量上限，这里用 self.tril[:T, :T] 按需切片）</span>
+
+        <span class="c1"># causal mask: 禁止当前位置关注未来 token（只挡住 t&#39;&gt;t，t&#39;&lt;=t 含自身都保留）</span>
+        <span class="c1"># 注意：这里是&quot;多位置并行&quot;场景（一次前向同时算 T 个位置），才需要这行显式 mask；</span>
+        <span class="c1"># 如果是 KV Cache 的增量解码（每步只有 1 个新 query 对历史 cache），cache 里天生没有未来，不需要这行</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">wei</span><span class="o">.</span><span class="n">masked_fill</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tril</span><span class="p">[:</span><span class="n">T</span><span class="p">,</span> <span class="p">:</span><span class="n">T</span><span class="p">]</span> <span class="o">==</span> <span class="mi">0</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="s1">&#39;-inf&#39;</span><span class="p">))</span> <span class="c1"># (B,T,T) -&gt; (B,T,T)</span>
+
+        
+        <span class="c1"># softmax 后得到动态 attention distribution。</span>
+        <span class="c1"># 这里的 wei 可称为 attention weights，但它不是 trainable parameters。</span>
+
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">wei</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B,T,T)</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dropout</span><span class="p">(</span><span class="n">wei</span><span class="p">)</span>
+        <span class="n">v</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">value</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,head_size)</span>
+        <span class="c1"># B,T,T @ B,T,head_size --&gt; B,T,head_size</span>
+
+        <span class="c1"># 用 attention distribution 对 value 做加权聚合。</span>
+        <span class="n">out</span> <span class="o">=</span> <span class="n">wei</span> <span class="o">@</span> <span class="n">v</span> 
+        <span class="k">return</span> <span class="n">out</span> <span class="c1"># (B,T,T) @ (B,T,head_size) --&gt; (B,T,head_size)</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>0487e841</code></summary>
+      <hr />
+<h2>Attention 内部：从&quot;独立&quot;到&quot;关联&quot;的精确临界点</h2>
+<p>这是理解 attention 最容易含糊带过的地方——&quot;跟其他 token 有关系&quot;这句话太笼统，
+下面按 <code>Head.forward</code> 里的<strong>每一行代码</strong>标出独立性在哪一行被打破、又在哪一行被约束。</p>
+<pre><code class="language-python">def forward(self, x):              # x: (B, T, C)，此时每个 (b,t) 位置的向量互不相干（独立）
+    B, T, C = x.shape
+
+    k = self.key(x)                 # 第①行 —— 仍然独立
+    q = self.query(x)               # 第②行 —— 仍然独立
+    v = self.value(x)               # 第③行 —— 仍然独立
+
+    wei = q @ k.transpose(-2, -1) * C**-0.5   # 第④行 —— 独立被打破的临界点！
+    wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # 第⑤行 —— 强制约束关联范围
+    wei = F.softmax(wei, dim=-1)    # 第⑥行 —— 归一化，此刻只是&quot;关系强度&quot;，还没混合内容
+
+    out = wei @ v                   # 第⑦行 —— 真正发生&quot;内容混合&quot;的地方
+    return out
+</code></pre>
+<h3>逐行拆解独立性状态</h3>
+<p><strong>① ② ③ <code>k/q/v = self.xxx(x)</code>——仍然独立</strong></p>
+<p><code>nn.Linear(n_embd, head_size)</code> 是一个**逐位置（pointwise）**操作：对 <code>(B,T,C)</code> 的每一个 <code>(b,t)</code> 向量，
+独立地做同一个矩阵乘法 <code>x[b,t,:] @ W</code>，<code>t</code> 和 <code>t'</code> 之间没有任何计算交叉。
+<code>B</code> 和 <code>T</code> 在这一步都还是并行独立的——跟 embedding 查表那一步的独立性质完全一样。</p>
+<p><strong>④ <code>wei = q @ k.transpose(-2,-1)</code>——独立被打破的确切时刻</strong></p>
+<p>这是全部计算里<strong>唯一</strong>让 <code>T</code> 个位置开始互相&quot;看见&quot;对方的一行。
+<code>q</code> 的形状是 <code>(B,T,head_size)</code>，<code>k.transpose</code> 后是 <code>(B,head_size,T)</code>，
+矩阵乘法迫使 <code>q</code> 的<strong>每一行</strong>（每个位置的 query）去跟 <code>k</code> 的<strong>每一列</strong>（每个位置的 key）做点积，
+结果 <code>wei[b,t,t']</code> 表示&quot;位置 t 与位置 t' 的相似度&quot;——<strong>从这一行开始，位置 t 的计算结果依赖于其他所有位置 t'</strong>。</p>
+<p>（<code>B</code> 维度自始至终没有参与这次矩阵乘法的交叉，<code>torch.bmm</code> 风格的批量矩阵乘法只在每个 batch 内部做，batch 之间永远独立。）</p>
+<p><strong>⑤ <code>masked_fill(tril==0, -inf)</code>——约束关联范围，不是恢复独立</strong></p>
+<p>第④行让位置 t 能看到<strong>所有</strong>位置（包括未来），这一行强制把 <code>t' &gt; t</code> 的关联度设为 <code>-inf</code>。
+这不是&quot;重新变回独立&quot;，而是<strong>限定了&quot;能关联到谁&quot;的范围</strong>：t 只能跟 <code>t' &lt;= t</code> 产生关联，
+<code>t' &gt; t</code> 的关联强度归零（经过 softmax 后变成概率 0）。</p>
+<p><strong>⑥ <code>softmax(wei, dim=-1)</code>——只是归一化&quot;关系强度&quot;，内容还没被混合</strong></p>
+<p>这一步把 <code>wei[b,t,:]</code> 变成一行合法的概率分布（加起来等于 1），
+但此时 <code>wei</code> 里存的仍然只是&quot;位置 t 应该多大程度参考位置 t'&quot;这个<strong>权重</strong>，
+value 的实际内容（<code>v</code>）还没有被加权求和，混合尚未发生。</p>
+<p><strong>⑦ <code>out = wei @ v</code>——内容真正发生混合的地方</strong></p>
+<p><code>wei</code> (B,T,T) 与 <code>v</code> (B,T,head_size) 相乘，<code>out[b,t,:]</code> = 对所有允许的 <code>t'</code>，按 <code>wei[b,t,t']</code> 加权求和 <code>v[b,t',:]</code>。
+到这一步，位置 t 的输出向量里才真正<strong>融入了</strong>其他位置（t' &lt;= t）的内容信息，不再是它自己独立的向量。</p>
+<h3>一句话总结独立→关联的转变</h3>
+<pre><code>x, k, q, v          : B 独立, T 内部各位置也独立（逐位置线性变换）
+        ↓ q @ k.T   :  ← 这一步引入 T 内部位置间的关联（B 依然独立）
+wei (masked+softmax) : T 内部关联被限定在&quot;只能看过去&quot;，且已归一化为权重
+        ↓ wei @ v   :  ← 这一步才把关联转化为真正的内容混合
+out                 : 每个位置的向量已经不再独立，包含了它能看到的历史信息
+</code></pre>
+<p><code>B</code> 这个维度<strong>在整个 attention 计算中永远保持独立</strong>——不管哪一行代码，batch 之间都不会发生任何交叉计算，
+这也是为什么&quot;batch 之间独立&quot;是一条从 embedding 到最终输出都成立的不变量。</p>
+
+    </details>
+    
+    <details >
+      <summary>note <code>44e0837e</code></summary>
+      <hr />
+<h2>精确定位：两次矩阵乘法各自消掉了哪个维度</h2>
+<p>一个常见的表述偏差是笼统地说&quot;C 在乘法里被消除了&quot;，需要把 <strong>C</strong> 和 <strong>head_size</strong> 分开，精确到位。</p>
+<p><strong>1. q、k 天然携带内容+位置信息</strong>：<code>q = x @ W_q</code>、<code>k = x @ W_k</code>，两者都是从同一个 <code>x</code>（<code>tok_emb + pos_emb</code>）分别投影出来的，
+所以每个位置 t 的 <code>q[t]</code>、<code>k[t]</code> 里都编码了&quot;这个位置的内容是什么 + 排第几&quot;。</p>
+<p><strong>2. 精确的维度消除顺序</strong>：</p>
+<pre><code>第一次乘法：x @ W        (B,T,C) @ (C,head_size) → (B,T,head_size)
+            ↑ 消除的是 C，结果压缩成 head_size 维
+
+此时 q、k 已经不是 C 维了，而是 head_size 维——
+&quot;内容+位置&quot;信息已经被压缩进了这个更小的 head_size 维向量里
+
+第二次乘法：q @ k.T      (B,T,head_size) @ (B,head_size,T) → (B,T,T)
+            ↑ 消除的是 head_size，不是 C（C 在上一步就已经不存在了）
+</code></pre>
+<p>更准确的说法是：<strong>C 在第一次乘法里就已经被&quot;用掉&quot;压缩成了 head_size；第二次乘法消除的是这个 head_size</strong>，
+产出的 <code>wei[b,t,t']</code> 是一个标量（相似度分数），不再携带任何维度的语义细节——
+&quot;这里 C 不重要&quot;这个直觉是对的，只是发生的时间点在更早的那一步。</p>
+<p><strong>3. 最后一步 <code>out = wei @ v</code></strong>：<code>wei</code> 只是&quot;关注权重&quot;（标量集合），真正的内容（<code>v</code>）在这一步才被加权带入，
+位置 t 的输出向量从此不再独立，融合了它能看到的历史位置的信息。</p>
+<p>一句话总结：<strong>两次矩阵乘法各自消掉一个维度（C→head_size→标量），信息逐步从&quot;每个位置自己的表示&quot;压缩成&quot;位置间的关系强度&quot;，最后再用这个关系强度去加权聚合 v，完成真正的内容混合</strong>。</p>
+
+    </details>
+    
+    <details >
+      <summary>note <code>5de99ef7</code></summary>
+      <hr />
+<h2>补充理解：C 不是&quot;不重要&quot;，而是&quot;被消耗掉产出了关系分数&quot;——v 才是语义的真正载体</h2>
+<p>前面说&quot;C 在第二次乘法里不重要&quot;容易被误读成&quot;C 没有意义&quot;，需要纠正为更精确的版本：</p>
+<p><strong>C 从一开始就是有意义的</strong>：<code>token_embedding_table</code> + <code>position_embedding_table</code> 两次查表，
+共同赋予了任意 token ID 在 <code>n_embd</code> 语义空间里的具体坐标——这是整个模型&quot;理解语言&quot;的基础，绝非无关维度。</p>
+<p><strong>进入一个 head 之后，这份 C 维语义并没有消失，只是被投影/压缩了</strong>：</p>
+<pre><code>Multi-head 的本质: n_embd = head_size × n_head
+                            ↑
+                    每个 head 只分到一部分语义子空间，
+                    但这个子空间仍然来自完整的 C 维语义（W_q/W_k/W_v 各自把全部 C 维都看了一遍再投影）
+</code></pre>
+<p>也就是说，<code>q</code>、<code>k</code>、<code>v</code> 虽然形状都是 <code>(B,T,head_size)</code>，但它们各自都是&quot;C 维语义&quot;经过不同投影矩阵压缩后的产物，<strong>不是舍弃了 C 维信息，而是每个 head 用自己的方式重新提炼了一份</strong>。</p>
+<p><strong>关键的不对称性——q/k 和 v 在语义传递上的角色完全不同</strong>：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>q、k</th>
+<th>v</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>语义去向</td>
+<td>参与点积，被压缩成一个<strong>标量</strong>（<code>wei[t,t']</code>，即相似度分数）</td>
+<td>被 <code>wei</code> 加权求和后，直接进入 <code>out</code>，<strong>以向量形式</strong>保留下来</td>
+</tr>
+<tr>
+<td>是否携带到 <code>out</code></td>
+<td><strong>不会</strong>——q、k 具体的数值在算出 <code>wei</code> 之后就&quot;用完&quot;了，不会再出现在最终输出里</td>
+<td><strong>会</strong>——<code>out[t]</code> 本质上就是若干个 <code>v</code> 向量的加权平均，<code>v</code> 的语义内容原封不动地&quot;活&quot;在了输出里</td>
+</tr>
+</tbody>
+</table>
+<p>一句话总结：<strong>q、k 的使命是&quot;计算该关注谁&quot;，v 的使命是&quot;提供被关注时应该传递什么内容&quot;</strong>。
+虽然 <code>v</code> 的 shape 看起来只是 <code>head_size</code>（不是完整的 <code>C</code>），但它承载的正是从 <code>n_embd</code> 语义空间投影过来的核心内容——<code>out</code> 最终能表达丰富语义，靠的就是 <code>v</code>，而不是 <code>q</code>、<code>k</code>。</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

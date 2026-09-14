@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 18 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class="active"><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step17.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 18 / 20</span>
+      <a href="step19.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">18</span>KV Cache — Reuse Instead of Recompute</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1000 560" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step18.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep18(ctx, 1000, 560);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">Real numbers from your notebook's new cell 36 — cache trades memory for compute. Highlighted "new" cell = k_new, this step's only fresh column</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">k_cache = torch.cat([k_cache, k_new], dim=1)   # append, don't recompute
+v_cache = torch.cat([v_cache, v_new], dim=1)
+wei = q_new @ k_cache.transpose(-2,-1) * head_size**-0.5</code>
+    <div class="shape-line">per layer: <span class="tag">K_cache (B, n_head, T_so_far, head_size)</span> — the genuine 4D tensor</div>
+    <p><b>Why K/V cached but not Q:</b> not about weights being fixed (all three are equally fixed after training) — it's <b>reuse count</b>. <code class="inline">k[t],v[t]</code> get read by every future step; <code class="inline">q[t]</code> is used exactly once, the step it's born, then discarded.</p>
+    
+    <div class="aside evidence"><b>Real proof: the new position attends to itself too — "≤ t", not "&lt; t".</b> Your notebook's cell 35, step 1's real captured output: <code class="inline">x_new.shape=(3,1,8)</code> → <code class="inline">k_cache.shape=(3,1,4)</code> — at this exact moment the cache contains <b>only</b> the current position's own <code class="inline">k</code> (nothing earlier exists yet), and attention still runs successfully. That's only possible because the new position attends to <i>itself</i> too, not just strictly-earlier positions — if the rule were really "t' &lt; t", step 1 would have nothing to attend to at all. In the "俯视" (T,head_size) view from step 6: q (1,head_size) attends against k (t+1,head_size) — t+1 rows, covering positions 0 through t <b>inclusive</b>. This is also precisely why the code comment below says "no causal mask needed": self-inclusion plus zero future in the cache together mean there is nothing left that would ever need masking.</div>
+    
+    <div class="aside normal"><b>One label correction, from the same real output: it's <code class="inline">head_size</code>, not <code class="inline">n_embd</code>.</b> Cell 35 sets <code class="inline">n_embd=8</code> (the input dimension) but every printed <code class="inline">k_cache.shape</code> is <code class="inline">(B, t, 4)</code> — 4 is <code class="inline">head_size</code>. <code class="inline">Wk</code> projects <code class="inline">n_embd→head_size</code> <i>before</i> anything gets cached; the cache only ever stores post-projection vectors, never the raw <code class="inline">n_embd</code>-dimensional input.</div>
+    
+    <div class="aside warn"><b>A real limitation of this specific demo, not of KV Cache in general.</b> Cell 35's captured output shows <code class="inline">x_new.shape=(3,1,8)</code> at <b>every single step, including step 1</b> — this implementation processes even the prompt one token at a time through the same loop, rather than batch-filling the cache with the whole prompt in one <code class="inline">(B,P,n_embd)</code> call. A production KV-cache system normally does the latter (a real parallel prefill over all P prompt tokens, filling the cache once), then switches to <code class="inline">(B,1,n_embd)</code> only for decode afterward. This notebook's demo doesn't show that distinction — worth knowing it's a simplification for teaching the append/evict mechanism, not the only correct way to implement this.</div>
+    
+    <div class="aside normal"><b>Connecting back to step 13's "wasted logits" observation.</b> Step 13 noticed a real waste: <code class="inline">self(idx_cond)</code> scores every position, but <code class="inline">logits[:, -1, :]</code> keeps only the last one. That waste is real but small — one <code class="inline">lm_head</code> projection, once, at the very end. <b>This step is the big one</b>: without a cache, every one of those same wasted iterations was <i>also</i> recomputing <code class="inline">Wq/Wk/Wv</code> and <code class="inline">q@k.T</code>/<code class="inline">wei@v</code> for every position, in every head, in every layer — <code class="inline">n_layer</code>×<code class="inline">n_head</code> repetitions per step, not 1. That's the scale difference between "a detail worth noticing" (step 13) and "the actual reason this optimization exists" (here).</div>
+    
+    <div class="aside evidence"><b>Real proof, your notebook cell 36 (T_total=6):</b> naive recompute = <b>252</b> cumulative q/k/v elements (~O(T²)); with cache = <b>72</b> elements (~O(T)) — but cache peak memory ≈ <b>192 bytes</b>, and it must stay resident until generation ends. <b>This is "trade memory for compute", not "save memory"</b> — exactly why KV-Cache memory growth is a real production bottleneck (vLLM's PagedAttention exists to manage it).</div>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>HeadWithSlidingCache</b> (gpt-dev.ipynb, new cell)</span><span>your own from-scratch KV-cache implementation</span></div>
+    <pre>class HeadWithSlidingCache(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.Wq = nn.Linear(n_embd, head_size, bias=False)
+        self.Wk = nn.Linear(n_embd, head_size, bias=False)
+        self.Wv = nn.Linear(n_embd, head_size, bias=False)
+        self.k_cache = None
+        self.v_cache = None
+
+    def forward(self, x_new):                       # x_new: (B, 1, n_embd) -- B not hardcoded to 1
+        q_new = self.Wq(x_new)                       # (B, 1, head_size)
+<span class="hl">        k_new = self.Wk(x_new)</span>
+<span class="hl">        v_new = self.Wv(x_new)</span>
+
+<span class="hl">        self.k_cache = k_new if self.k_cache is None else torch.cat([self.k_cache, k_new], dim=1)</span>
+<span class="hl">        self.v_cache = v_new if self.v_cache is None else torch.cat([self.v_cache, v_new], dim=1)</span>
+
+        if self.k_cache.shape[1] &gt; block_size:
+            self.k_cache = self.k_cache[:, -block_size:, :]
+            self.v_cache = self.v_cache[:, -block_size:, :]
+
+<span class="hl">        wei = q_new @ self.k_cache.transpose(-2, -1) * head_size**-0.5</span>
+        wei = F.softmax(wei, dim=-1)   # no causal mask needed: q_new is 1 row, k_cache is all history
+        return wei @ self.v_cache</pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>PyTorch internals:</b> <code class="inline">self.k_cache = None</code> in <code class="inline">__init__</code> is a plain Python attribute, not a registered buffer — it isn't saved by <code class="inline">state_dict()</code> and won't move with <code class="inline">.to(device)</code> automatically (you'd manage that yourself in a production version). <code class="inline">torch.cat([self.k_cache, k_new], dim=1)</code> reallocates a new, slightly bigger tensor every single call — this is the literal, physical reason KV-cache memory keeps growing: it's not appended in place, it's copy-and-grow.</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>155e8b0e</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># NOTE (cleanup, no values/behavior changed): renamed the bare n_embd/n_head/vocab_size/block_size in this self-contained demo to *_demo below, so this illustration can&#39;t silently overwrite the REAL model&#39;s globals set earlier in the notebook.</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn.functional</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">F</span>
+
+<span class="c1"># 用一个极简 Head 演示：无 KV Cache vs 有 KV Cache 的推理差异</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">manual_seed</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span> <span class="o">=</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">4</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">HeadNoCache</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">block_size_demo</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wq</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wk</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wv</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">register_buffer</span><span class="p">(</span><span class="s1">&#39;tril&#39;</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">tril</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">block_size_demo</span><span class="p">,</span> <span class="n">block_size_demo</span><span class="p">)))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>              <span class="c1"># x: (B, T, n_embd_demo)</span>
+        <span class="n">B</span><span class="p">,</span> <span class="n">T</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">shape</span>
+        <span class="n">q</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wq</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>                 <span class="c1"># (B, T, head_size)</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wk</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>                 <span class="c1"># 每次调用都重新计算所有 T 个 k</span>
+        <span class="n">v</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wv</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>                 <span class="c1"># 每次调用都重新计算所有 T 个 v</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">q</span> <span class="o">@</span> <span class="n">k</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">head_size</span><span class="o">**-</span><span class="mf">0.5</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">wei</span><span class="o">.</span><span class="n">masked_fill</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tril</span><span class="p">[:</span><span class="n">T</span><span class="p">,:</span><span class="n">T</span><span class="p">]</span><span class="o">==</span><span class="mi">0</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="s1">&#39;-inf&#39;</span><span class="p">))</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">wei</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">wei</span> <span class="o">@</span> <span class="n">v</span>                 <span class="c1"># (B, T, head_size)</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">HeadWithCache</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wq</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wk</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wv</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="o">=</span> <span class="kc">None</span>   <span class="c1"># 存历史 k，shape: (B, past_T, head_size)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x_new</span><span class="p">):</span>         <span class="c1"># x_new: (B, 1, n_embd_demo) — 只传入新 token</span>
+        <span class="n">q</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wq</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>            <span class="c1"># (B, 1, head_size)</span>
+        <span class="n">k_new</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wk</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>        <span class="c1"># (B, 1, head_size) — 只计算新 token 的 k</span>
+        <span class="n">v_new</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wv</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>        <span class="c1"># (B, 1, head_size)</span>
+
+        <span class="c1"># 追加到 cache</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="o">=</span> <span class="n">k_new</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="p">,</span> <span class="n">k_new</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="o">=</span> <span class="n">v_new</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span><span class="p">,</span> <span class="n">v_new</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+        <span class="c1"># Q 是新 token，K/V 来自全部历史（含自身）</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">q</span> <span class="o">@</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">head_size</span><span class="o">**-</span><span class="mf">0.5</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">wei</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>  <span class="c1"># 不需要 causal mask：q 只有 1 行，k_cache 都是历史</span>
+        <span class="k">return</span> <span class="n">wei</span> <span class="o">@</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span>     <span class="c1"># (B, 1, head_size)</span>
+
+<span class="c1"># 模拟：序列 [t0, t1, t2, t3, t4]，逐步生成</span>
+<span class="n">B</span><span class="p">,</span> <span class="n">T</span><span class="p">,</span> <span class="n">C</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="n">n_embd_demo</span>
+<span class="n">full_seq</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">B</span><span class="p">,</span> <span class="n">T</span><span class="p">,</span> <span class="n">C</span><span class="p">)</span>
+
+<span class="c1"># 无 KV Cache：每步都把全序列喂进去</span>
+<span class="n">head_no_cache</span> <span class="o">=</span> <span class="n">HeadNoCache</span><span class="p">(</span><span class="n">block_size_demo</span><span class="o">=</span><span class="n">T</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;=== 无 KV Cache：每步重新计算全部 K/V ===&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">T</span><span class="o">+</span><span class="mi">1</span><span class="p">):</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">head_no_cache</span><span class="p">(</span><span class="n">full_seq</span><span class="p">[:,</span> <span class="p">:</span><span class="n">t</span><span class="p">,</span> <span class="p">:])</span>
+    <span class="n">k_computed</span> <span class="o">=</span> <span class="n">t</span>  <span class="c1"># 这一步计算了 t 个 k 向量</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  步骤 </span><span class="si">{</span><span class="n">t</span><span class="si">}</span><span class="s2">: 输入 </span><span class="si">{</span><span class="n">t</span><span class="si">}</span><span class="s2"> 个 token，计算了 </span><span class="si">{</span><span class="n">k_computed</span><span class="si">}</span><span class="s2"> 个 K 向量（重复计算前 </span><span class="si">{</span><span class="n">t</span><span class="o">-</span><span class="mi">1</span><span class="si">}</span><span class="s2"> 个）&quot;</span><span class="p">)</span>
+
+<span class="c1"># 有 KV Cache：每步只喂新 token</span>
+<span class="n">head_cache</span> <span class="o">=</span> <span class="n">HeadWithCache</span><span class="p">()</span>
+<span class="c1"># 手动对齐权重，确保数学等价</span>
+<span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+    <span class="n">head_cache</span><span class="o">.</span><span class="n">Wq</span><span class="o">.</span><span class="n">weight</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">head_no_cache</span><span class="o">.</span><span class="n">Wq</span><span class="o">.</span><span class="n">weight</span><span class="p">)</span>
+    <span class="n">head_cache</span><span class="o">.</span><span class="n">Wk</span><span class="o">.</span><span class="n">weight</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">head_no_cache</span><span class="o">.</span><span class="n">Wk</span><span class="o">.</span><span class="n">weight</span><span class="p">)</span>
+    <span class="n">head_cache</span><span class="o">.</span><span class="n">Wv</span><span class="o">.</span><span class="n">weight</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">head_no_cache</span><span class="o">.</span><span class="n">Wv</span><span class="o">.</span><span class="n">weight</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">=== 有 KV Cache：每步只计算新 token 的 K/V ===&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">T</span><span class="p">):</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">head_cache</span><span class="p">(</span><span class="n">full_seq</span><span class="p">[:,</span> <span class="n">t</span><span class="p">:</span><span class="n">t</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span> <span class="p">:])</span>   <span class="c1"># 只传 1 个新 token</span>
+    <span class="n">cache_size</span> <span class="o">=</span> <span class="n">head_cache</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  步骤 </span><span class="si">{</span><span class="n">t</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">: 输入 1 个新 token，cache 中 K/V 数量: </span><span class="si">{</span><span class="n">cache_size</span><span class="si">}</span><span class="s2">，节省了重算 </span><span class="si">{</span><span class="n">t</span><span class="si">}</span><span class="s2"> 个历史 K/V&quot;</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">KV Cache 的存储结构（此例单层单头）:&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  k_cache shape: </span><span class="si">{</span><span class="n">head_cache</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">  (B=1, 已见过的 T=</span><span class="si">{</span><span class="n">T</span><span class="si">}</span><span class="s2"> 个位置, head_size=</span><span class="si">{</span><span class="n">head_size</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  v_cache shape: </span><span class="si">{</span><span class="n">head_cache</span><span class="o">.</span><span class="n">v_cache</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">  完整模型: n_layer 个 Block，每个 Block 存一份 (K_cache, V_cache)&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  K_cache shape per layer: (B, n_head_demo, T_so_far, head_size)&quot;</span><span class="p">)</span>
+</pre></div>
+
+    </details>
+    
+    <details >
+      <summary>cell <code>8deef03f</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># NOTE (cleanup, no values/behavior changed): renamed the bare n_embd/n_head/vocab_size/block_size in this self-contained demo to *_demo below, so this illustration can&#39;t silently overwrite the REAL model&#39;s globals set earlier in the notebook.</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn.functional</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">F</span>
+
+<span class="c1"># 验证两件事：</span>
+<span class="c1"># (1) cache 超过 block_size_demo 后必须淘汰最旧的一条 —— 滑动窗口作用在 K/V 上</span>
+<span class="c1"># (2) batch 维度 B 在 KV Cache 生成过程中原样保留，不会被&quot;一次前进一个&quot;压缩成 1</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">manual_seed</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">block_size_demo</span> <span class="o">=</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">4</span>  <span class="c1"># block_size_demo 故意设小，方便观察淘汰</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">HeadWithSlidingCache</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wq</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wk</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wv</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x_new</span><span class="p">):</span>                       <span class="c1"># x_new: (B, 1, n_embd_demo) —— B 不是写死的 1</span>
+        <span class="n">q_new</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wq</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>                       <span class="c1"># (B, 1, head_size)</span>
+        <span class="n">k_new</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wk</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>
+        <span class="n">v_new</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wv</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="o">=</span> <span class="n">k_new</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="p">,</span> <span class="n">k_new</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="o">=</span> <span class="n">v_new</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span><span class="p">,</span> <span class="n">v_new</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+        <span class="c1"># 滑动窗口：cache 超过 block_size_demo 就砍掉最旧的一条，等价于 idx[:, -block_size_demo:] 但作用对象是 K/V</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">block_size_demo</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size_demo</span><span class="p">:,</span> <span class="p">:]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size_demo</span><span class="p">:,</span> <span class="p">:]</span>
+
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">q_new</span> <span class="o">@</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">head_size</span><span class="o">**-</span><span class="mf">0.5</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">wei</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">wei</span> <span class="o">@</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span>                    <span class="c1"># (B, 1, head_size)</span>
+
+<span class="n">B</span> <span class="o">=</span> <span class="mi">3</span>            <span class="c1"># 故意用 B&gt;1，验证&quot;批&quot;这个维度在生成阶段并未消失</span>
+<span class="n">T_total</span> <span class="o">=</span> <span class="mi">7</span>      <span class="c1"># 总共前进 7 步，超过 block_size_demo=4，必然触发淘汰</span>
+<span class="n">x_seq</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">B</span><span class="p">,</span> <span class="n">T_total</span><span class="p">,</span> <span class="n">n_embd_demo</span><span class="p">)</span>
+
+<span class="n">head</span> <span class="o">=</span> <span class="n">HeadWithSlidingCache</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;batch_size B=</span><span class="si">{</span><span class="n">B</span><span class="si">}</span><span class="s2">，block_size_demo=</span><span class="si">{</span><span class="n">block_size_demo</span><span class="si">}</span><span class="s2">（cache 容量上限）</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">T_total</span><span class="p">):</span>
+    <span class="n">x_new</span> <span class="o">=</span> <span class="n">x_seq</span><span class="p">[:,</span> <span class="n">t</span><span class="p">:</span><span class="n">t</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span>                       <span class="c1"># 每步只喂 1 个新位置，batch 维度 B 原样保留</span>
+    <span class="n">out_new</span> <span class="o">=</span> <span class="n">head</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>
+    <span class="n">evicted</span> <span class="o">=</span> <span class="s2">&quot;  ← 已触发淘汰，丢弃最旧一条&quot;</span> <span class="k">if</span> <span class="p">(</span><span class="n">t</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">block_size_demo</span> <span class="k">else</span> <span class="s2">&quot;&quot;</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;步骤 </span><span class="si">{</span><span class="n">t</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">: x_new.shape=</span><span class="si">{</span><span class="nb">tuple</span><span class="p">(</span><span class="n">x_new</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span><span class="si">}</span><span class="s2"> → out_new.shape=</span><span class="si">{</span><span class="nb">tuple</span><span class="p">(</span><span class="n">out_new</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span><span class="si">}</span><span class="s2"> &quot;</span>
+          <span class="sa">f</span><span class="s2">&quot;| k_cache.shape=</span><span class="si">{</span><span class="nb">tuple</span><span class="p">(</span><span class="n">head</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span><span class="si">}{</span><span class="n">evicted</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">结论1（滑动窗口 ↔ KV Cache）：cache 的容量上限就是 block_size_demo，超出后淘汰最旧的一条，&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;        和朴素版 idx[:, -block_size_demo:] 的滑动窗口是同一个约束，只是作用对象从 token id 变成了 K/V。&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;结论2（batch vs token）：k_cache.shape[0] 始终等于 </span><span class="si">{</span><span class="n">head</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2">（=B），&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;        &#39;一次前进一个&#39; 消掉的是序列长度维度 T，batch 维度 B 完全不受影响。&quot;</span><span class="p">)</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>40ff40f0</code></summary>
+      <hr />
+<h2>KV Cache 与训练/推理的关系</h2>
+<h3>重要前提：KV Cache 只属于推理，训练不用它</h3>
+<p>训练时整个序列一次并行处理，不存在&quot;重复计算&quot;问题，所以不需要 cache。</p>
+<p>KV Cache 解决的是推理时的冗余：每生成一个新 token 都要对整个历史序列重跑一遍 attention，而历史序列的 K 和 V 根本没变——cache 就是把它们存起来复用。</p>
+<hr />
+<h3>KV Cache 的最小单元：每个 Block（层）一份 (K_cache, V_cache)</h3>
+<pre><code>模型结构:
+  Block 0 (MultiHeadAttention → FeedForward)
+    ├── Head 0: W_q0, W_k0, W_v0
+    ├── Head 1: W_q1, W_k1, W_v1
+    └── Head 2, Head 3 ...
+  Block 1 ...
+  Block 2 ...
+  Block 3 ...
+
+KV Cache 存储结构（推理时，生成到第 t 步）:
+  Block 0 → K_cache shape: (B, n_head, t, head_size)
+           → V_cache shape: (B, n_head, t, head_size)
+  Block 1 → K_cache, V_cache  （同上）
+  Block 2 → K_cache, V_cache
+  Block 3 → K_cache, V_cache
+</code></pre>
+<p><strong>最小单元是每个 Block（层）的 (K_cache, V_cache)</strong>，内部已经把所有 head 的 K/V 合并成了 (B, n_head, T, head_size) 的 4D 张量，不需要单独为每个 head 存一份。</p>
+<hr />
+<h3>训练 vs 推理：本质上只差 3 行</h3>
+<pre><code class="language-python"># ── 训练循环 ──────────────────────────────────
+model.train()
+xb, yb = get_batch('train')      # 随机采样 (ix)
+logits, loss = model(xb, yb)     # 前向传播
+loss.backward()                  # ← 训练独有
+optimizer.step()                 # ← 训练独有
+optimizer.zero_grad()            # ← 训练独有
+
+# ── 推理（generate 内部）────────────────────────
+model.eval()
+with torch.no_grad():            # ← 推理独有：不追踪梯度
+    logits, _ = model(idx_cond)  # 前向传播（相同的 forward 函数！）
+    # 取最后一步的 logits → softmax → 采样下一个 token
+</code></pre>
+<p><strong>forward() 函数完全相同，PyTorch 自动区分梯度追踪模式。</strong>
+<code>model.train()</code> 开启 Dropout；<code>model.eval()</code> 关闭 Dropout，但 forward 的数学逻辑一字不差。</p>
+
+    </details>
+    
+    <details >
+      <summary>note <code>0ae0a325</code></summary>
+      <hr />
+<h2>精确修正：为什么只有 K/V 被缓存、Q 不需要——不是&quot;权重新旧&quot;，而是&quot;复用次数&quot;</h2>
+<p>一个常见的偏差：把&quot;K/V 被缓存&quot;归因于&quot;训练后 <code>W_k</code>、<code>W_v</code> 的权重已经固定&quot;，而 Q &quot;是新的，真实来自 prompt input&quot;。
+需要澄清：<strong><code>W_q</code>、<code>W_k</code>、<code>W_v</code> 训练后同样固定，三者在这一点上完全对称</strong>——
+<code>q = x @ W_q</code>、<code>k = x @ W_k</code>、<code>v = x @ W_v</code>，公式形式、权重的&quot;固定程度&quot;没有任何区别，
+推理时三者都是用同一套训练好的固定权重去做同样的线性投影。</p>
+<p>真正决定&quot;要不要缓存&quot;的，不是权重是否固定，而是<strong>这个向量在后续生成过程中会被读取（复用）几次</strong>：</p>
+<pre><code>位置 t 的 k[t]、v[t]：
+  - 生成第 t 步时算一次
+  - 之后每一步（t+1, t+2, ..., T-1）的新 query 都要回头和 k[t] 算相似度、用 v[t] 加权
+  - 被读取次数 = 未来还会生成的步数（越早出现的 token，被复用次数越多）
+  - 不缓存 → 每一步都要把 0..t 全部重新过一遍 W_k、W_v → 造成 O(T) 级别的重复计算
+
+位置 t 的 q[t]：
+  - 生成第 t 步时算一次
+  - 仅在这一步内部使用一次：q[t] @ k[0..t].T → 算出 wei[t, :]
+  - 算完这一步就再也不会被用到——没有任何未来步骤会&quot;回头用旧的 q&quot;
+  - 复用次数 = 1 次 → 缓存它没有意义，因为它天生只用一次即报废
+</code></pre>
+<p>一句话总结：<strong>q/k/v 权重的&quot;固定&quot;是三者共同的前提，不是区分点；真正的区分点是 k、v 会被未来所有位置反复读取，而 q 天生只在诞生的那一步被用一次。</strong></p>
+<p><strong>再修正一处描述</strong>：<code>out = wei @ v</code> 严格来说不是&quot;把标量逐个追加到矩阵元素上&quot;，而是<strong>加权求和</strong>——
+每个标量 <code>wei[t,t']</code> 缩放对应的向量 <code>v[t']</code>，再把这 T 个缩放后的向量按位相加，得到一个仍然是 <code>head_size</code> 维的输出向量 <code>out[t]</code>
+（维度不会变大，也没有&quot;新增元素&quot;）。而这个 <code>out</code>，才是真正通过残差连接 <code>x = x + self.sa(...)</code> 加回到带有 embedding+position 信息的 <code>x</code> 上的东西——
+加回去的是&quot;经相似度加权融合后的 v 内容&quot;，而不是相似度分数（<code>wei</code>）本身。</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

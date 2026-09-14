@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 3 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class="active"><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step02.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 3 / 20</span>
+      <a href="step04.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">3</span>Token Embedding Lookup</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1400 700" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step03.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep3(ctx, 1400, 700);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">The table's row 18 (real token id) points to the EXACT front-face cell (t=0,b=0) — the front face is the true (B,T) input shape; the top face is the resulting dense values, stated in text below (not a fragile per-cell arrow)</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">token_embedding_table = nn.Embedding(vocab_size, n_embd)
+tok_emb = token_embedding_table(idx)</code>
+    <div class="shape-line"><span class="tag">(B,T)</span> → <span class="tag">(B,T,n_embd=64)</span></div>
+    <p><code class="inline">token_embedding_table.weight</code> is <b>always just a 2D table</b>, shape (65,64) — <b>rows = token identity</b> (fixed count, tokenizer-set), <b>columns = learnable semantics</b>. Lookup is a direct row-gather, never a one-hot matmul. Notice each batch layer now looks <i>different</i> — the content depends on <b>which token</b> is at that position, which differs per row.</p>
+    
+    <div class="aside normal">Rows and columns are decoupled: swap in a bigger vocabulary (more rows) and n_embd (columns) doesn't change at all.</div>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>BigramLanguageModel</b> (gpt-dev.ipynb)</span><span>__init__ + forward()</span></div>
+    <pre>class BigramLanguageModel(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+<span class="hl">        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)</span>
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
+        self.lm_head = nn.Linear(n_embd, vocab_size)
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+<span class="hl">        tok_emb = self.token_embedding_table(idx) # (B,T,C)</span>
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        x = tok_emb + pos_emb # (B,T,C)
+        x = self.blocks(x) # (B,T,C)
+        x = self.ln_f(x) # (B,T,C)
+        logits = self.lm_head(x) # (B,T,vocab_size)
+
+        if targets is None:
+            loss = None
+        else:
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            targets = targets.view(B*T)
+            loss = F.cross_entropy(logits, targets)
+
+        return logits, loss</pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>PyTorch internals:</b> <code class="inline">nn.Embedding(vocab_size, n_embd)</code> allocates one learnable parameter tensor <code class="inline">weight</code> of shape <code class="inline">(vocab_size, n_embd)</code>, randomly initialized (~N(0,1)). Calling it — <code class="inline">token_embedding_table(idx)</code> — internally runs <code class="inline">weight.index_select(0, idx.flatten()).view(*idx.shape, n_embd)</code>: a pure row-gather, registered in the autograd graph so gradients flow back only into the <i>rows that were actually looked up</i> this batch — untouched rows get zero gradient this step.</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>8119b626</code></summary>
+      <div class="hl-code"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">BigramLanguageModel</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="c1"># each token directly reads off the logits for the next token from a lookup table</span>
+        <span class="c1"># 将vocab_size个字符映射到n_embd维的向量空间中</span>
+        <span class="c1"># 输入xb和yb是形状为(B,T)的整数张量，输出是形状为(B,T,C)的浮点数张量，其中C是内部的维度n_embd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">token_embedding_table</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="n">vocab_size</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">)</span>
+        <span class="c1"># 位置向量的计算基于sequence的长度T，所以输入是一个长度为T的整数张量，输出是一个形状为(T,C)的浮点数张量</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">position_embedding_table</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="n">block_size</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">)</span>
+        <span class="c1"># 因为作为基本transformer单元的Block输出形状是B,T,n_embd，所以输入也是B,T,n_embd，输出也是B,T,n_embd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">blocks</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="o">*</span><span class="p">[</span><span class="n">Block</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">n_head</span><span class="o">=</span><span class="n">n_head</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_layer</span><span class="p">)])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ln_f</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">LayerNorm</span><span class="p">(</span><span class="n">n_embd</span><span class="p">)</span> <span class="c1"># final layer norm</span>
+        <span class="c1"># 将B,T,n_embd维的表示映射回vocab_size维的空间中，得到每个位置上每个字符的预测分数,变成B,T,vocab_size的形状</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">lm_head</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">vocab_size</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> <span class="n">targets</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="n">B</span><span class="p">,</span> <span class="n">T</span> <span class="o">=</span> <span class="n">idx</span><span class="o">.</span><span class="n">shape</span>
+
+        <span class="c1"># idx and targets are both (B,T) tensor of integers，we pass them through the model to produce logits, which are (B,T,vocab_size) tensor of floats</span>
+        <span class="c1"># 输入来自xb和yb是形状为(B,T)的整数张量</span>
+        <span class="n">tok_emb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">token_embedding_table</span><span class="p">(</span><span class="n">idx</span><span class="p">)</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">pos_emb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">position_embedding_table</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">T</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">))</span> <span class="c1"># (T,C)</span>
+        <span class="c1"># 这里的广播机制会将pos_emb从(T,C)扩展到(B,T,C)，使得每个序列位置都有一个对应的嵌入向量</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">tok_emb</span> <span class="o">+</span> <span class="n">pos_emb</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">blocks</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,C)  之前被误注释掉，导致 attention/FFN 完全不生效，这里改正</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ln_f</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">logits</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">lm_head</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,vocab_size)</span>
+
+        <span class="k">if</span> <span class="n">targets</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">B</span><span class="p">,</span> <span class="n">T</span><span class="p">,</span> <span class="n">C</span> <span class="o">=</span> <span class="n">logits</span><span class="o">.</span><span class="n">shape</span>
+            <span class="n">logits</span> <span class="o">=</span> <span class="n">logits</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">B</span><span class="o">*</span><span class="n">T</span><span class="p">,</span> <span class="n">C</span><span class="p">)</span>
+            <span class="n">targets</span> <span class="o">=</span> <span class="n">targets</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">B</span><span class="o">*</span><span class="n">T</span><span class="p">)</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">cross_entropy</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">targets</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">logits</span><span class="p">,</span> <span class="n">loss</span>
+
+    <span class="c1"># generate</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> <span class="n">max_new_tokens</span><span class="p">):</span>
+        <span class="c1"># idx is (B, T) array of indices in the current context</span>
+        <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">max_new_tokens</span><span class="p">):</span>
+            <span class="c1"># crop idx to the last block_size tokens</span>
+            <span class="n">idx_cond</span> <span class="o">=</span> <span class="n">idx</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size</span><span class="p">:]</span>
+            <span class="c1"># get the predictions</span>
+            <span class="n">logits</span><span class="p">,</span> <span class="n">loss</span> <span class="o">=</span> <span class="bp">self</span><span class="p">(</span><span class="n">idx_cond</span><span class="p">)</span>
+            <span class="c1"># focus only on the last time step</span>
+            <span class="n">logits</span> <span class="o">=</span> <span class="n">logits</span><span class="p">[:,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span> <span class="c1"># becomes (B, C)</span>
+            <span class="c1"># apply softmax to get probabilities</span>
+            <span class="n">probs</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, C)</span>
+            <span class="c1"># sample from the distribution</span>
+            <span class="n">idx_next</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">multinomial</span><span class="p">(</span><span class="n">probs</span><span class="p">,</span> <span class="n">num_samples</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, 1)</span>
+            <span class="c1"># append sampled index to the running sequence</span>
+            <span class="n">idx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">((</span><span class="n">idx</span><span class="p">,</span> <span class="n">idx_next</span><span class="p">),</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, T+1)</span>
+        <span class="k">return</span> <span class="n">idx</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>219b0ee6</code></summary>
+      <hr />
+<h2>三个后续问题</h2>
+<h3>Q1（原始理解，已修正）：不需要 4D 瞬间，本质是二维查表 + 向量化 index</h3>
+<p><strong>最初的想法</strong>：<code>(B,T)</code> 先展开成 one-hot <code>(B,T,vocab_size)</code>（&quot;4D 瞬间&quot;），再 <code>@ W</code> 坍缩回 <code>(B,T,n_embd)</code>。</p>
+<p><strong>修正后的理解（更准确、更贴近真实实现）</strong>：</p>
+<p><code>nn.Embedding</code> 的权重 <code>W</code> 本质上只是一张<strong>二维表</strong>：</p>
+<pre><code>W.shape = (vocab_size, n_embd)
+            ↑ 行数        ↑ 列数
+      由 tokenizer 词表大小唯一决定    架构自由选择的维度，训练前人为设定
+      （比如 65 个字符，或 GPT-2 的 50257 个 BPE token）   （不关心具体数值，只是一个&quot;够用&quot;的向量长度）
+</code></pre>
+<ul>
+<li><strong>行</strong>：每一行对应一个唯一的 token ID，是身份索引，不可学习（数量由 tokenizer 定死）。</li>
+<li><strong>列</strong>：随机初始化，训练中被反向传播更新，是&quot;可学习的语义坐标&quot;。</li>
+<li><strong>查表</strong> = <strong>index</strong>：token ID 是几，就直接取第几行，是 O(1) 的 gather 操作。</li>
+</ul>
+<p>不需要经过 one-hot 展开再坍缩这一步（那只是数学上等价的另一种表达，PyTorch 底层直接做 <code>weight[input_ids]</code>，省掉了构造一个几乎全零的大稀疏张量的开销）。</p>
+<p><strong>行数与列数互不耦合</strong>：换一个 tokenizer（词表变大/变小）只改变行数，n_embd 完全不受影响——这也印证了&quot;行是身份，列是语义&quot;这个划分是对的。</p>
+<hr />
+<h3>重要澄清：T 不只是&quot;sequence size&quot;，更准确的理解是&quot;position&quot;</h3>
+<p>这是一个容易卡住理解的地方：</p>
+<pre><code>T 这个维度，两种描述都对，但适用场景不同：
+
+&quot;sequence size&quot;  —— 描述的是&quot;这批数据里，一条序列有多长&quot;
+                     强调的是数据组织形式（数了多少个 token）
+
+&quot;position&quot;       —— 描述的是&quot;每个 token 在序列中排第几&quot;
+                     强调的是每个 token 自己的身份和用途
+</code></pre>
+<p><strong>为什么会同时出现两种叫法</strong>：因为 <code>T</code> 这个维度里的每一个元素，来源都是&quot;tokenizer 输出的一个 token ID&quot;，
+这个 token ID <strong>既承载了内容信息（通过 embedding 查表拿到语义向量），也承载了位置信息（它在序列里排第几，即 position）</strong>。</p>
+<pre><code class="language-python">tok_emb = token_embedding_table(idx)                            # 内容：查表得到语义向量
+pos_emb = position_embedding_table(torch.arange(T, device=device))  # 位置：0,1,2,...,T-1 这几个位置索引，也去查另一张表
+x = tok_emb + pos_emb   # 两者相加，糅合了&quot;内容&quot;和&quot;位置&quot;两种信息
+</code></pre>
+<p><code>position_embedding_table</code> 是<strong>另一张独立的查找表</strong>，形状是 <code>(block_size, n_embd)</code>，
+行数由<strong>最大序列长度</strong>决定，而不是 vocab_size；查表用的索引是 <code>0, 1, 2, ..., T-1</code> 这几个位置编号，跟 token ID 无关。</p>
+<p><strong>两张表对照一览</strong>：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>token_embedding_table</th>
+<th>position_embedding_table</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>行数（容量）</td>
+<td><code>vocab_size</code>（词表大小，超参数固定）</td>
+<td><code>block_size</code>（最大上下文长度，超参数固定）</td>
+</tr>
+<tr>
+<td>查表用的索引</td>
+<td>token ID（内容是什么）</td>
+<td>位置编号 0..T-1（排第几）</td>
+</tr>
+<tr>
+<td>行的含义</td>
+<td>每个 token 的语义</td>
+<td>每个位置的&quot;顺序坐标&quot;</td>
+</tr>
+<tr>
+<td>表内数值</td>
+<td>随机初始化，可学习</td>
+<td>随机初始化，可学习（两张表都会被训练更新）</td>
+</tr>
+<tr>
+<td>输出形状</td>
+<td><code>(T, n_embd)</code>（这里 T 是本次输入的 idx 长度）</td>
+<td><code>(T, n_embd)</code>（广播对齐 tok_emb）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>这一步承上启下</strong>：<code>tok_emb</code> 和 <code>pos_emb</code> 相加得到的 <code>x</code>，形状仍是 <code>(B, T, n_embd)</code>，
+这就是即将喂给 <code>Head</code>（或 <code>MultiHeadAttention</code>）去计算 <code>q/k/v</code> 的<strong>最终输入</strong>。</p>
+<p>也就是说，进入 attention 之前，每个位置的向量已经同时携带了&quot;内容&quot;和&quot;顺序&quot;两种信息——
+<code>Head.forward</code> 里 <code>q = self.query(x)</code> 这一步的 <code>x</code>，本身就是 <code>tok_emb + pos_emb</code> 的结果，
+不是单纯的 token 语义向量。这也是为什么 attention 能够区分&quot;同样的字在不同位置&quot;的原因。</p>
+<p>所以看到 <code>B*T*C</code> 或&quot;T 个位置&quot;这种表述时：</p>
+<ul>
+<li><strong>B<em>T</em>C</strong>：说的是张量形状，此时 T 强调的是&quot;这批数据有多长&quot;（sequence size 视角）</li>
+<li><strong>T 个位置的输出同时算出</strong>：说的是 attention 内部的计算行为，此时 T 强调的是&quot;每个位置各自的身份和相互关系&quot;（position 视角）</li>
+</ul>
+<p>两种表述描述的是同一个维度 <code>T</code>，只是站在不同角度（数据组织 vs. 逐位置的语义/计算行为）去说而已，不是两个不同的东西。</p>
+<hr />
+<h3>Q2: Embedding 权重矩阵会保存并用于推理 — 是的，它就是普通参数</h3>
+<p><code>nn.Embedding.weight</code> 和 <code>nn.Linear.weight</code> 没有任何区别：
+都是 <code>nn.Parameter</code>，都参与梯度更新，都保存进 <code>model.state_dict()</code>，推理时直接加载复用。</p>
+<hr />
+<h3>Q3: Causal Attention 一次并行完成，不是 N 次循环 — Transformer vs RNN 的核心区别</h3>
+<pre><code>RNN（旧方式）: [10] → [10,20] → [10,20,30] → [10,20,30,40] → [10,20,30,40,50]
+              需要 5 次串行前向传播，不能并行
+
+Transformer（现在）:
+  输入 [10, 20, 30, 40, 50] 一次性全部喂入
+  q @ k.T 一次计算出 (T, T) = (5, 5) 的全局相似度矩阵
+  causal mask 把上三角置为 -inf
+  softmax 后每个位置的 attention weight 自然满足&quot;只看自己之前&quot;的约束
+  → 5 个位置的输出同时算出，完全并行
+
+代价: 需要 O(T²) 的显存（存 T×T 的 attention 矩阵）
+优势: 训练时一个 forward pass 同时优化 T 个预测目标
+</code></pre>
+<p>这就是 Transformer 取代 RNN 的根本原因：用空间换时间，把串行变并行。</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

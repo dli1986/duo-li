@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 19 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class="active"><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step18.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 19 / 20</span>
+      <a href="step20.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">19</span>Sliding Window — Cap at block_size</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1100 320" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step19.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep19(ctx, 1100, 320);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">Real sequence from your notebook: block_size=6, oldest entries evicted once full</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">idx_cond = idx[:, -block_size:]              # naive version
+k_cache = k_cache[:, -block_size:]           # KV-cache version, same idea</code>
+    <div class="shape-line">once total length &gt; block_size: oldest entry dropped, size stays capped</div>
+    <p>The exact same constraint applies whether you're sliding raw token ids or K/V cache entries — the model architecturally cannot attend beyond <code class="inline">block_size</code> positions. This is why the cache is <b>not</b> infinitely growing: it has the same hard ceiling as the naive version.</p>
+    
+    <div class="aside evidence"><b>Real captured output, your notebook (B=3, block_size=4):</b> steps 1-4 grow the cache to <code class="inline">(3,1,4)→(3,2,4)→(3,3,4)→(3,4,4)</code>; from step 5 onward it stays capped at <code class="inline">(3,4,4)</code> with each new step printing "← 已触发淘汰，丢弃最旧一条" (eviction triggered, oldest entry dropped).</div>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>HeadWithSlidingCache.forward()</b> (gpt-dev.ipynb)</span><span>same class as step 18, the eviction check</span></div>
+    <pre>def forward(self, x_new):
+        q_new = self.Wq(x_new)
+        k_new = self.Wk(x_new)
+        v_new = self.Wv(x_new)
+
+        self.k_cache = k_new if self.k_cache is None else torch.cat([self.k_cache, k_new], dim=1)
+        self.v_cache = v_new if self.v_cache is None else torch.cat([self.v_cache, v_new], dim=1)
+
+<span class="hl">        if self.k_cache.shape[1] &gt; block_size:</span>
+<span class="hl">            self.k_cache = self.k_cache[:, -block_size:, :]</span>
+<span class="hl">            self.v_cache = self.v_cache[:, -block_size:, :]</span>
+
+        wei = q_new @ self.k_cache.transpose(-2, -1) * head_size**-0.5
+        wei = F.softmax(wei, dim=-1)
+        return wei @ self.v_cache</pre>
+  </div>
+  
+
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>76b4b966</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># NOTE (cleanup, no values/behavior changed): renamed the bare n_embd/n_head/vocab_size/block_size in this self-contained demo to *_demo below, so this illustration can&#39;t silently overwrite the REAL model&#39;s globals set earlier in the notebook.</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="c1"># 用 nanoGPT 的 generate() 逐步打印窗口行为（不修改原函数，直接模拟逻辑）</span>
+
+<span class="n">block_size_demo</span>  <span class="o">=</span> <span class="mi">6</span>   <span class="c1"># 模型支持的最大上下文长度</span>
+<span class="n">generate_n</span>  <span class="o">=</span> <span class="mi">10</span>  <span class="c1"># 要生成的新 token 数</span>
+<span class="n">prompt_len</span>  <span class="o">=</span> <span class="mi">4</span>   <span class="c1"># prompt 长度</span>
+
+<span class="c1"># 模拟 prompt: token IDs [10, 20, 30, 40]</span>
+<span class="n">idx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([[</span><span class="mi">10</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">40</span><span class="p">]])</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;block_size_demo（最大窗口）= </span><span class="si">{</span><span class="n">block_size_demo</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;prompt 长度 = </span><span class="si">{</span><span class="n">prompt_len</span><span class="si">}</span><span class="s2">，生成 </span><span class="si">{</span><span class="n">generate_n</span><span class="si">}</span><span class="s2"> 个新 token&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;步骤&#39;</span><span class="si">:</span><span class="s2">&lt;6</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="s1">&#39;窗口内容（idx[:,-block_size_demo:]）&#39;</span><span class="si">:</span><span class="s2">&lt;35</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="s1">&#39;cache大小&#39;</span><span class="si">:</span><span class="s2">&lt;10</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="s1">&#39;是否滑动&#39;</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;-&quot;</span> <span class="o">*</span> <span class="mi">72</span><span class="p">)</span>
+
+<span class="c1"># Step 0: 处理整个 prompt（并行）</span>
+<span class="n">idx_cond</span> <span class="o">=</span> <span class="n">idx</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size_demo</span><span class="p">:]</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;S0&#39;</span><span class="si">:</span><span class="s2">&lt;6</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="nb">str</span><span class="p">(</span><span class="n">idx_cond</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">tolist</span><span class="p">())</span><span class="si">:</span><span class="s2">&lt;35</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">idx_cond</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="si">:</span><span class="s2">&lt;10</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="s1">&#39;初始（并行处理prompt）&#39;</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">step</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">generate_n</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span>
+    <span class="c1"># 模拟采样新 token（用随机整数代替真实 logits）</span>
+    <span class="n">new_token</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">50</span><span class="p">,</span> <span class="mi">100</span><span class="p">,</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+    <span class="n">idx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="n">idx</span><span class="p">,</span> <span class="n">new_token</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="c1"># nanoGPT generate() 里的窗口裁剪</span>
+    <span class="n">idx_cond</span> <span class="o">=</span> <span class="n">idx</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size_demo</span><span class="p">:]</span>
+
+    <span class="n">sliding</span> <span class="o">=</span> <span class="s2">&quot;← 滑动！丢掉最旧token&quot;</span> <span class="k">if</span> <span class="n">idx</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">block_size_demo</span> <span class="k">else</span> <span class="s2">&quot;&quot;</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;S&#39;</span><span class="o">+</span><span class="nb">str</span><span class="p">(</span><span class="n">step</span><span class="p">)</span><span class="si">:</span><span class="s2">&lt;6</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="nb">str</span><span class="p">(</span><span class="n">idx_cond</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">tolist</span><span class="p">())</span><span class="si">:</span><span class="s2">&lt;35</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">idx_cond</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="si">:</span><span class="s2">&lt;10</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">sliding</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;最终序列总长度: </span><span class="si">{</span><span class="n">idx</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2">，但每次 forward 最多看最近 </span><span class="si">{</span><span class="n">block_size_demo</span><span class="si">}</span><span class="s2"> 个 token&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;对应 nanoGPT 源码中的一行:&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">&quot;  idx_cond = idx[:, -block_size_demo:]  # 这就是滑动窗口的全部实现&quot;</span><span class="p">)</span>
+</pre></div>
+
+    </details>
+    
+    <details >
+      <summary>cell <code>8deef03f</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># NOTE (cleanup, no values/behavior changed): renamed the bare n_embd/n_head/vocab_size/block_size in this self-contained demo to *_demo below, so this illustration can&#39;t silently overwrite the REAL model&#39;s globals set earlier in the notebook.</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn.functional</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">F</span>
+
+<span class="c1"># 验证两件事：</span>
+<span class="c1"># (1) cache 超过 block_size_demo 后必须淘汰最旧的一条 —— 滑动窗口作用在 K/V 上</span>
+<span class="c1"># (2) batch 维度 B 在 KV Cache 生成过程中原样保留，不会被&quot;一次前进一个&quot;压缩成 1</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">manual_seed</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">block_size_demo</span> <span class="o">=</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">4</span>  <span class="c1"># block_size_demo 故意设小，方便观察淘汰</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">HeadWithSlidingCache</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wq</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wk</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Wv</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd_demo</span><span class="p">,</span> <span class="n">head_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x_new</span><span class="p">):</span>                       <span class="c1"># x_new: (B, 1, n_embd_demo) —— B 不是写死的 1</span>
+        <span class="n">q_new</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wq</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>                       <span class="c1"># (B, 1, head_size)</span>
+        <span class="n">k_new</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wk</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>
+        <span class="n">v_new</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">Wv</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="o">=</span> <span class="n">k_new</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="p">,</span> <span class="n">k_new</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="o">=</span> <span class="n">v_new</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span><span class="p">,</span> <span class="n">v_new</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+        <span class="c1"># 滑动窗口：cache 超过 block_size_demo 就砍掉最旧的一条，等价于 idx[:, -block_size_demo:] 但作用对象是 K/V</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">block_size_demo</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size_demo</span><span class="p">:,</span> <span class="p">:]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size_demo</span><span class="p">:,</span> <span class="p">:]</span>
+
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">q_new</span> <span class="o">@</span> <span class="bp">self</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">head_size</span><span class="o">**-</span><span class="mf">0.5</span>
+        <span class="n">wei</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">wei</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">wei</span> <span class="o">@</span> <span class="bp">self</span><span class="o">.</span><span class="n">v_cache</span>                    <span class="c1"># (B, 1, head_size)</span>
+
+<span class="n">B</span> <span class="o">=</span> <span class="mi">3</span>            <span class="c1"># 故意用 B&gt;1，验证&quot;批&quot;这个维度在生成阶段并未消失</span>
+<span class="n">T_total</span> <span class="o">=</span> <span class="mi">7</span>      <span class="c1"># 总共前进 7 步，超过 block_size_demo=4，必然触发淘汰</span>
+<span class="n">x_seq</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">B</span><span class="p">,</span> <span class="n">T_total</span><span class="p">,</span> <span class="n">n_embd_demo</span><span class="p">)</span>
+
+<span class="n">head</span> <span class="o">=</span> <span class="n">HeadWithSlidingCache</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;batch_size B=</span><span class="si">{</span><span class="n">B</span><span class="si">}</span><span class="s2">，block_size_demo=</span><span class="si">{</span><span class="n">block_size_demo</span><span class="si">}</span><span class="s2">（cache 容量上限）</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">T_total</span><span class="p">):</span>
+    <span class="n">x_new</span> <span class="o">=</span> <span class="n">x_seq</span><span class="p">[:,</span> <span class="n">t</span><span class="p">:</span><span class="n">t</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span>                       <span class="c1"># 每步只喂 1 个新位置，batch 维度 B 原样保留</span>
+    <span class="n">out_new</span> <span class="o">=</span> <span class="n">head</span><span class="p">(</span><span class="n">x_new</span><span class="p">)</span>
+    <span class="n">evicted</span> <span class="o">=</span> <span class="s2">&quot;  ← 已触发淘汰，丢弃最旧一条&quot;</span> <span class="k">if</span> <span class="p">(</span><span class="n">t</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">block_size_demo</span> <span class="k">else</span> <span class="s2">&quot;&quot;</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;步骤 </span><span class="si">{</span><span class="n">t</span><span class="o">+</span><span class="mi">1</span><span class="si">}</span><span class="s2">: x_new.shape=</span><span class="si">{</span><span class="nb">tuple</span><span class="p">(</span><span class="n">x_new</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span><span class="si">}</span><span class="s2"> → out_new.shape=</span><span class="si">{</span><span class="nb">tuple</span><span class="p">(</span><span class="n">out_new</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span><span class="si">}</span><span class="s2"> &quot;</span>
+          <span class="sa">f</span><span class="s2">&quot;| k_cache.shape=</span><span class="si">{</span><span class="nb">tuple</span><span class="p">(</span><span class="n">head</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span><span class="si">}{</span><span class="n">evicted</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">结论1（滑动窗口 ↔ KV Cache）：cache 的容量上限就是 block_size_demo，超出后淘汰最旧的一条，&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;        和朴素版 idx[:, -block_size_demo:] 的滑动窗口是同一个约束，只是作用对象从 token id 变成了 K/V。&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;结论2（batch vs token）：k_cache.shape[0] 始终等于 </span><span class="si">{</span><span class="n">head</span><span class="o">.</span><span class="n">k_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2">（=B），&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;        &#39;一次前进一个&#39; 消掉的是序列长度维度 T，batch 维度 B 完全不受影响。&quot;</span><span class="p">)</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>2a5d5d0b</code></summary>
+      <hr />
+<h2>推理全流程 + 上下文窗口</h2>
+<pre><code>Pre-trained 模型（权重全部固定）
+  ↓
+prompt 文本 → tokenizer → token IDs (整数序列，长度 P)
+  ↓
+Step 0  第一次前向传播（处理整个 prompt）:
+  - prompt 的 P 个 token 一次并行喂入
+  - 走 embedding → n_layer 个 Block（attention + FFN）
+  - 每个 Block 的 K/V 全部 cache（shape: B, n_head, P, head_size）
+  - 取最后一个位置的 logits → 采样 → 得到第一个输出 token t₁
+  ↓
+Step 1  只喂入 t₁（1 个 token）:
+  - 计算 t₁ 的 Q、K_new、V_new
+  - K_new 追加到 cache → cache size = P+1
+  - Q 对整个 cache 做 attention → 得到 t₁ 位置的输出 → 采样 t₂
+  ↓
+Step 2  只喂入 t₂ ...（重复）
+
+当 cache size 达到 block_size（最大上下文长度）:
+  - 丢掉最旧的那条 cache（向左滑动）
+  - 模型&quot;忘记&quot;最早的 token
+  - 窗口始终保持 block_size 大小
+</code></pre>
+<p><strong>关键：prompt 处理是一次并行，后续 token 生成是逐步串行 + 窗口滑动</strong></p>
+
+    </details>
+    
+    <details >
+      <summary>note <code>d815cbed</code></summary>
+      <hr />
+<h2>融会贯通：Embedding 固定 + Q/K/V 复用差异 + 滑动窗口 + Batch 维度</h2>
+<h3>1）确认：两次查表（token_embedding_table、position_embedding_table）在推理时权重同样固定</h3>
+<p><code>nn.Embedding</code> 的 <code>.weight</code> 本质就是一个可学习的查找表矩阵（形状分别是 <code>(vocab_size, n_embd)</code> 和 <code>(block_size, n_embd)</code>）。
+训练结束后这两个矩阵和 <code>W_q/W_k/W_v</code> 一样被固定；推理时 <code>tokenizer → token_id → 查表</code> 得到的 <code>tok_emb</code>、<code>pos_emb</code>，
+用的都是训练好的固定权重，数学过程与训练时完全一致，只是不再有 <code>loss.backward()</code> / <code>optimizer.step()</code>。</p>
+<h3>2）再确认一次用词：&quot;追加&quot;应改成&quot;加权求和&quot;</h3>
+<p><code>wei @ v</code> 不是把标量&quot;追加&quot;进 v，而是每个 <code>wei[t,t']</code>（标量）缩放对应的 <code>v[t']</code>（向量）后按位相加，
+输出仍是 <code>head_size</code> 维——是<strong>加权融合</strong>，不是<strong>拼接/追加</strong>。</p>
+<h3>3）KV Cache 必须和滑动窗口（block_size）绑在一起理解</h3>
+<p>朴素版 <code>generate()</code>（<code>idx_cond = idx[:, -block_size:]</code>）每一步都把窗口内<strong>全部</strong> token 重新算一遍——
+滑动窗口在朴素版里只解决&quot;模型能接受多长输入&quot;，不解决&quot;重复计算&quot;。</p>
+<p>引入 KV Cache 后，滑动窗口的含义要多加一层：</p>
+<pre><code>朴素版滑动窗口：       idx     = idx[:, -block_size:]      → 砍掉最旧的 token id
+KV Cache 版滑动窗口：  k_cache = k_cache[:, -block_size:]   → 砍掉最旧的 K
+                       v_cache = v_cache[:, -block_size:]   → 砍掉最旧的 V（同理）
+</code></pre>
+<p><strong>&quot;一次前进一个&quot;</strong> 指的是：每一步只对 1 个新 token 跑一次前向（只算它的 <code>q_new</code>/<code>k_new</code>/<code>v_new</code>），
+<code>k_new</code>/<code>v_new</code> 追加进 cache，cache 一旦超过 <code>block_size</code> 就砍掉最旧的一条——
+这就是为什么必须先理解滑动窗口，才能理解 KV Cache 的边界条件（cache 不是无限增长的）。</p>
+<p>而 Q 不需要缓存的原因和滑动窗口无关（上一轮已确认过）：<code>q_new</code> 只在诞生的这一步内部用一次，用完即弃，
+根本不存在&quot;要不要用滑动窗口保留它&quot;这个问题——它从一开始就没打算被复用。</p>
+<h3>4）&quot;一次前进一个&quot;指的是 batch 里每条序列各前进一个 token，不是把 batch 折叠成 1</h3>
+<p>训练时：<code>get_batch()</code> 一次给出 <code>(B, block_size)</code> 个 token，B 条序列全部并行、每条序列内部 T 个位置也全部并行（teacher forcing）。</p>
+<p>生成时（用 KV Cache）：每一步的输入形状是 <code>(B, 1, n_embd)</code>，<strong>不是 <code>(1, 1, n_embd)</code></strong>——
+<code>B</code> 这个维度原封不动地保留，因为完全可以同时生成 B 条独立序列（比如一次采样 4 个候选回答）；
+&quot;一次前进一个&quot;消掉的是<strong>序列长度维度 T</strong>（从&quot;一次处理多个位置&quot;变成&quot;一次只处理新增的 1 个位置&quot;），
+这和 batch 维度 B 是两件独立的事——B 条序列各自独立地、各前进 1 个 token，互不合并、互不影响。</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

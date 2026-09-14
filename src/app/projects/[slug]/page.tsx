@@ -54,6 +54,15 @@ export default async function ProjectPage({
         </a>
       )}
 
+      {project.demoUrl && (
+        <a
+          href={project.demoUrl}
+          className="mt-4 ml-4 inline-block text-sm text-accent hover:underline"
+        >
+          View live walkthrough &rarr;
+        </a>
+      )}
+
       <div className="prose prose-zinc mt-10 max-w-none dark:prose-invert">
         <MDXRemote source={project.content} />
       </div>

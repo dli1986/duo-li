@@ -4,22 +4,35 @@ slug: "personal-cognitive-agent"
 status: "active"
 technologies:
   - "Python"
-  - "Agent Runtime"
-  - "Memory Systems"
-summary: "Personal agent experiments covering knowledge management, memory systems and agent workflows."
+  - "FastAPI"
+  - "LangGraph"
+  - "SQLite"
+  - "React"
+  - "Vite"
+summary: "A local, LLM-powered spaced-repetition system that ingests notes from Markdown, Notion and an Obsidian/PKG-Wiki vault, generates review questions, and schedules reviews to help retain knowledge over time."
 repository: "https://github.com/dli1986/PersonalCognitiveAgent"
 order: 2
 ---
 
 ## Overview
 
-Personal agent experiments.
+PCA ingests notes from multiple sources into a local SQLite knowledge store, automatically generates review questions using an LLM, and schedules them with SM-2-style spaced repetition.
 
-## Topics
+## What it does
 
-- Knowledge management
-- Memory systems
-- Agent workflows
+1. **Ingests** notes (Markdown files, Notion exports, Obsidian/PKG-Wiki vault) into a local SQLite knowledge store
+2. **Generates** targeted review questions for each knowledge node using a configured LLM
+3. **Schedules** reviews using spaced repetition — well-known nodes are reviewed less often; gaps are caught early
+4. **Evaluates** answers and updates confidence scores and review intervals automatically
+5. **Watches** note directories for new/modified files and syncs them in the background without restarting
+
+## Architecture
+
+A FastAPI server exposes a REST API (`/nodes`, `/review/*`, `/stats`) alongside a LangGraph agent (`AgentReasoner`) that drives the begin → question → submit → evaluate loop. A background review loop and a file watcher (watchdog) keep the SQLite knowledge store in sync with source notes. A React + Vite dashboard talks to the server for reviewing and browsing knowledge nodes.
+
+## Knowledge Sources
+
+Three independent ingestion sources, usable together: a generic Markdown directory, a Notion export, or an Obsidian/PKG-Wiki vault (where PKG-Wiki's `raw/` holds source notes and its `wiki/` output is what PCA actually ingests).
 
 ## Lessons Learned
 

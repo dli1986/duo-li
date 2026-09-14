@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 13 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class=""><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class="active"><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step12.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 13 / 20</span>
+      <a href="step14.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">13</span>Prefill — Process the Whole Prompt in Parallel</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1300 750" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step13.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep13(ctx, 1300, 750);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">WIDE — the whole prompt goes in at once, exactly like Phase 1's forward pass. Same table as step 3, now FROZEN — real row-gather arrow, not a fragile front→top guess</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">idx_cond = idx[:, -block_size:]
+logits, _ = self(idx_cond)     # SAME forward() as training, no targets</code>
+    <div class="shape-line"><span class="tag">(B, P, n_embd)</span> — T=P here, NOT 1</div>
+    <p>This is exactly Phase 1's forward pass, reused unchanged, just with <code class="inline">model.eval()</code> + <code class="inline">torch.no_grad()</code> and no loss. The prompt's P tokens are processed <b>in parallel</b>, same as any training batch.</p>
+    
+    <div class="aside warn"><b>Important correctness note:</b> this literal <code class="inline">generate()</code> has <b>no KV cache</b> — <code class="inline">idx_cond = idx[:, -block_size:]</code> takes the <i>whole</i> recent window every single iteration, and <code class="inline">self(idx_cond)</code> reprocesses <i>all</i> of it from scratch, every time. "Prefill" here just means: the first time through this loop, that window happens to equal your original prompt. Step 18's KV Cache is a genuine optimization <i>on top of</i> this naive code, not something already present in it.</div>
+    
+    <div class="aside normal"><b>The diff: what actually changes between iteration 1 and every iteration after.</b> The loop body's <i>code</i> is identical every single pass — only <code class="inline">idx</code>'s content grows:
+      <pre>iteration 1:  idx = [18,47,56,57,58,1]                (T=6=P)   ← idx_cond IS the prompt, unchanged
+iteration 2:  idx = [18,47,56,57,58,1, 43]            (T=7)     ← +1 generated token appended (illustrative id)
+iteration 3:  idx = [18,47,56,57,58,1,43, 12]         (T=8)     ← +1 more
+   ...
+iteration 27: idx now holds 32 tokens (P=6 + 26 generated)      ← window exactly full (block_size=32)
+iteration 28: idx_cond = idx[:, -block_size:] now DROPS the oldest token — sliding window starts here</pre>
+      This is the concrete version of the code's own comment, "1st time through: idx IS the prompt" — and it's <i>only</i> true for iteration 1. From iteration 2 onward this is conceptually "decode," even though, as the note above says, nothing in the code distinguishes them — it's the exact same <code class="inline">self(idx_cond)</code> call regardless of iteration number. That code-level distinction only starts to exist once KV Cache (step 18) is introduced: first call fills the cache from P tokens, every call after appends exactly 1.</div>
+    
+    <div class="aside normal"><b>A real, visible waste you can already see here — and how it connects to step 18, precisely.</b> <code class="inline">self(idx_cond)</code> computes logits for <b>every</b> position in the window, shape <code class="inline">(B,T,vocab_size)</code> — but <code class="inline">logits = logits[:, -1, :]</code> keeps only the <b>last</b> position (the one predicting the actual next token) and discards the other T−1 positions' scores, unused. Real and worth noticing — but it's the <b>small</b> example of naive recompute, not the main one: this waste only touches <code class="inline">lm_head</code>, one projection, once, at the very end of the whole forward pass. The <b>much larger</b> waste — the one KV Cache actually exists to fix — is every layer's <code class="inline">Wq/Wk/Wv</code> projection plus <code class="inline">q@k.T</code>/<code class="inline">wei@v</code>, recomputed <code class="inline">n_layer</code>×<code class="inline">n_head</code> times, every single iteration. That's precisely why step 18's cache is stored <i>per Block</i>, not at <code class="inline">lm_head</code> — the waste is concentrated deep in attention, not the final vocabulary projection.</div>
+    
+    <div class="aside normal"><b><code class="inline">max_new_tokens</code> — a caller-supplied hyperparameter, not part of the architecture.</b> It's simply "how many new tokens should this call to <code class="inline">generate()</code> produce" — e.g. the <code class="inline">100</code> in <code class="inline">model.generate(context, max_new_tokens=100)</code>. Unrelated to <code class="inline">block_size</code> or <code class="inline">n_embd</code>: you can set it far larger than <code class="inline">block_size</code> safely, since <code class="inline">idx_cond = idx[:, -block_size:]</code> keeps clipping the window every iteration regardless of how long <code class="inline">idx</code> has grown.</div>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>BigramLanguageModel.generate()</b> (gpt-dev.ipynb)</span><span>the very first loop iteration</span></div>
+    <pre>def generate(self, idx, max_new_tokens):
+        # idx is (B, T) array of indices in the current context
+        for _ in range(max_new_tokens):
+<span class="hl">            idx_cond = idx[:, -block_size:]   # 1st time through: idx IS the prompt</span>
+<span class="hl">            logits, loss = self(idx_cond)     # same forward() as steps 3-10, no targets</span>
+            logits = logits[:, -1, :]
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+        return idx</pre>
+  </div>
+  
+
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>8119b626</code></summary>
+      <div class="hl-code"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">BigramLanguageModel</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="c1"># each token directly reads off the logits for the next token from a lookup table</span>
+        <span class="c1"># 将vocab_size个字符映射到n_embd维的向量空间中</span>
+        <span class="c1"># 输入xb和yb是形状为(B,T)的整数张量，输出是形状为(B,T,C)的浮点数张量，其中C是内部的维度n_embd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">token_embedding_table</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="n">vocab_size</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">)</span>
+        <span class="c1"># 位置向量的计算基于sequence的长度T，所以输入是一个长度为T的整数张量，输出是一个形状为(T,C)的浮点数张量</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">position_embedding_table</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="n">block_size</span><span class="p">,</span> <span class="n">n_embd</span><span class="p">)</span>
+        <span class="c1"># 因为作为基本transformer单元的Block输出形状是B,T,n_embd，所以输入也是B,T,n_embd，输出也是B,T,n_embd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">blocks</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="o">*</span><span class="p">[</span><span class="n">Block</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">n_head</span><span class="o">=</span><span class="n">n_head</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_layer</span><span class="p">)])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ln_f</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">LayerNorm</span><span class="p">(</span><span class="n">n_embd</span><span class="p">)</span> <span class="c1"># final layer norm</span>
+        <span class="c1"># 将B,T,n_embd维的表示映射回vocab_size维的空间中，得到每个位置上每个字符的预测分数,变成B,T,vocab_size的形状</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">lm_head</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">n_embd</span><span class="p">,</span> <span class="n">vocab_size</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> <span class="n">targets</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="n">B</span><span class="p">,</span> <span class="n">T</span> <span class="o">=</span> <span class="n">idx</span><span class="o">.</span><span class="n">shape</span>
+
+        <span class="c1"># idx and targets are both (B,T) tensor of integers，we pass them through the model to produce logits, which are (B,T,vocab_size) tensor of floats</span>
+        <span class="c1"># 输入来自xb和yb是形状为(B,T)的整数张量</span>
+        <span class="n">tok_emb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">token_embedding_table</span><span class="p">(</span><span class="n">idx</span><span class="p">)</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">pos_emb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">position_embedding_table</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">T</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">))</span> <span class="c1"># (T,C)</span>
+        <span class="c1"># 这里的广播机制会将pos_emb从(T,C)扩展到(B,T,C)，使得每个序列位置都有一个对应的嵌入向量</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">tok_emb</span> <span class="o">+</span> <span class="n">pos_emb</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">blocks</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,C)  之前被误注释掉，导致 attention/FFN 完全不生效，这里改正</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ln_f</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,C)</span>
+        <span class="n">logits</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">lm_head</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="c1"># (B,T,vocab_size)</span>
+
+        <span class="k">if</span> <span class="n">targets</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">B</span><span class="p">,</span> <span class="n">T</span><span class="p">,</span> <span class="n">C</span> <span class="o">=</span> <span class="n">logits</span><span class="o">.</span><span class="n">shape</span>
+            <span class="n">logits</span> <span class="o">=</span> <span class="n">logits</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">B</span><span class="o">*</span><span class="n">T</span><span class="p">,</span> <span class="n">C</span><span class="p">)</span>
+            <span class="n">targets</span> <span class="o">=</span> <span class="n">targets</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">B</span><span class="o">*</span><span class="n">T</span><span class="p">)</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">cross_entropy</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">targets</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">logits</span><span class="p">,</span> <span class="n">loss</span>
+
+    <span class="c1"># generate</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> <span class="n">max_new_tokens</span><span class="p">):</span>
+        <span class="c1"># idx is (B, T) array of indices in the current context</span>
+        <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">max_new_tokens</span><span class="p">):</span>
+            <span class="c1"># crop idx to the last block_size tokens</span>
+            <span class="n">idx_cond</span> <span class="o">=</span> <span class="n">idx</span><span class="p">[:,</span> <span class="o">-</span><span class="n">block_size</span><span class="p">:]</span>
+            <span class="c1"># get the predictions</span>
+            <span class="n">logits</span><span class="p">,</span> <span class="n">loss</span> <span class="o">=</span> <span class="bp">self</span><span class="p">(</span><span class="n">idx_cond</span><span class="p">)</span>
+            <span class="c1"># focus only on the last time step</span>
+            <span class="n">logits</span> <span class="o">=</span> <span class="n">logits</span><span class="p">[:,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span> <span class="c1"># becomes (B, C)</span>
+            <span class="c1"># apply softmax to get probabilities</span>
+            <span class="n">probs</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, C)</span>
+            <span class="c1"># sample from the distribution</span>
+            <span class="n">idx_next</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">multinomial</span><span class="p">(</span><span class="n">probs</span><span class="p">,</span> <span class="n">num_samples</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, 1)</span>
+            <span class="c1"># append sampled index to the running sequence</span>
+            <span class="n">idx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">((</span><span class="n">idx</span><span class="p">,</span> <span class="n">idx_next</span><span class="p">),</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="c1"># (B, T+1)</span>
+        <span class="k">return</span> <span class="n">idx</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>2a5d5d0b</code></summary>
+      <hr />
+<h2>推理全流程 + 上下文窗口</h2>
+<pre><code>Pre-trained 模型（权重全部固定）
+  ↓
+prompt 文本 → tokenizer → token IDs (整数序列，长度 P)
+  ↓
+Step 0  第一次前向传播（处理整个 prompt）:
+  - prompt 的 P 个 token 一次并行喂入
+  - 走 embedding → n_layer 个 Block（attention + FFN）
+  - 每个 Block 的 K/V 全部 cache（shape: B, n_head, P, head_size）
+  - 取最后一个位置的 logits → 采样 → 得到第一个输出 token t₁
+  ↓
+Step 1  只喂入 t₁（1 个 token）:
+  - 计算 t₁ 的 Q、K_new、V_new
+  - K_new 追加到 cache → cache size = P+1
+  - Q 对整个 cache 做 attention → 得到 t₁ 位置的输出 → 采样 t₂
+  ↓
+Step 2  只喂入 t₂ ...（重复）
+
+当 cache size 达到 block_size（最大上下文长度）:
+  - 丢掉最旧的那条 cache（向左滑动）
+  - 模型&quot;忘记&quot;最早的 token
+  - 窗口始终保持 block_size 大小
+</code></pre>
+<p><strong>关键：prompt 处理是一次并行，后续 token 生成是逐步串行 + 窗口滑动</strong></p>
+
+    </details>
+    
+    <details >
+      <summary>note <code>b75ba165</code></summary>
+      <hr />
+<h2>追问核实：朴素 <code>generate()</code> 里，prefill/decode 到底浪费在哪、<code>max_new_tokens</code> 是什么、prefill 是不是&quot;预热&quot;</h2>
+<h3>1）<code>max_new_tokens</code> 是调用方传入的超参数，跟模型架构无关</h3>
+<p>它不是模型内部固定的东西，就是&quot;这次调用 <code>generate()</code>，你想让它再生成多少个新 token&quot;，由调用方决定，
+比如 <code>model.generate(context, max_new_tokens=100)</code> 里的 <code>100</code>。它和 <code>block_size</code>（架构上限）没有绑定关系——
+可以设成比 <code>block_size</code> 大得多的数，因为 <code>idx_cond = idx[:, -block_size:]</code> 会不断裁剪窗口，保证喂进模型的永远不超过 <code>block_size</code>。</p>
+<h3>2）朴素版 <code>generate()</code> 里，logits 也有一部分被白算——补充在&quot;K/V 重复计算&quot;之外的另一处浪费</h3>
+<pre><code class="language-python">logits, loss = self(idx_cond)     # (B, T, vocab_size) —— 当前窗口每一个位置的 logits 全部被算出来
+logits = logits[:, -1, :]         # 只取最后一个位置的结果去采样，前面 T-1 个位置的 logits 直接丢弃
+</code></pre>
+<p><code>self(idx_cond)</code> 内部把当前窗口<strong>每一个</strong>位置的 logits 都算出来了，但只有<strong>最后一个位置</strong>（即将预测&quot;下一个 token&quot;的那个位置）会被用来采样，前面 T-1 个位置的 <code>lm_head</code> 投影结果被白白算出来又直接丢弃。</p>
+<p><strong>这处浪费和&quot;K/V 被重复计算&quot;是同一个&quot;朴素重算&quot;问题的两个症状，但量级不同</strong>：<code>lm_head</code> 投影只发生<strong>一次</strong>（在整个前向传播的最后一步），而 <code>Wq/Wk/Wv</code> 投影和 <code>q@k.T</code>/<code>wei@v</code> 是在 <strong>每一层 Block、每一个 head</strong> 上都重复一遍——如果模型有 <code>n_layer</code> 层、每层 <code>n_head</code> 个头，attention 部分的重复计算量是 <code>lm_head</code> 这一次投影浪费的很多倍。<strong>KV Cache 真正要解决的大头是深埋在每一层 attention 里被反复重算的 K/V，不是最后这一次词表投影</strong>，这也是为什么 KV Cache 设计成&quot;每层 Block 各存一份 (K_cache, V_cache)&quot;，而不是在 <code>lm_head</code> 那里做缓存。</p>
+<h3>3）&quot;prefill 阶段&quot;精确到只有第一次循环，这份朴素代码其实分不清 prefill/decode</h3>
+<p><code>for _ in range(max_new_tokens):</code> 会循环 <code>max_new_tokens</code> 次。<strong>只有第一次循环</strong>，<code>idx_cond</code> 恰好等于 prompt 本身（T=P）；
+从第二次循环开始，<code>idx</code> 已经把上一步生成的新 token 拼接进去了，概念上已经进入 <strong>decode</strong> 阶段，不再是 prefill。</p>
+<p>但因为这份 <code>generate()</code> 完全没有 KV Cache，第 1 次循环和第 100 次循环走的是<strong>一模一样的代码路径</strong>（都是&quot;整窗口重新算一遍&quot;），
+没有任何代码层面的区别对待——prefill/decode 只是我们事后概念上贴的标签，代码本身分不出来。
+真正让 prefill/decode 产生<strong>代码级别差异</strong>的，是引入 KV Cache 之后：第一次调用变成&quot;处理 P 个 token、把 cache 填满&quot;，
+之后每次调用变成&quot;只处理 1 个新 token、往 cache 里追加&quot;——这时候两者才是真正不同的两段逻辑。</p>
+<h3>4）prefill 不是&quot;预热模型&quot;——模型权重全程冻结，prefill 真正的作用是&quot;为后续解码建立可复用的 K/V&quot;</h3>
+<p>&quot;预热&quot;暗示了&quot;模型内部有什么东西被调整/准备好了&quot;，但这里模型权重是<strong>冻结不变</strong>的，prefill 并不会改变模型任何状态。
+prefill 真正的作用（在有 KV Cache 的系统里）是&quot;把 prompt 对应的 K/V 算出来存进 cache，供后面每一步解码复用&quot;；
+而在朴素/无 cache 的实现里，第一次循环并没有&quot;准备&quot;什么东西留给后面用——后面每一步都是重新算的，跟第一次是否发生过没有任何关系。
+更准确的说法是：<strong>prefill 是生成开始前必须先做的第一次前向传播，用来算出&quot;prompt 最后一个位置&quot;的预测分布，而不是&quot;预热模型&quot;</strong>。</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

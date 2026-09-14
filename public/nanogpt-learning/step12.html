@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Step 12 — nanoGPT Pipeline</title>
+<link rel="stylesheet" href="static/css/style.css?v=1788631302" />
+<link rel="stylesheet" href="static/css/pygments.css?v=1788631302" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">nanoGPT Pipeline</a>
+  <ol>
+    
+    <li><a href="step01.html" class=""><span class="nav-num">1</span>Raw text → Tokenizer → Token IDs</a></li>
+    
+    <li><a href="step02.html" class=""><span class="nav-num">2</span>Batch Assembly — get_batch()</a></li>
+    
+    <li><a href="step03.html" class=""><span class="nav-num">3</span>Token Embedding Lookup</a></li>
+    
+    <li><a href="step04.html" class=""><span class="nav-num">4</span>Position Embedding Lookup — a SECOND, separate table</a></li>
+    
+    <li><a href="step05.html" class=""><span class="nav-num">5</span>Combine: x = tok_emb + pos_emb</a></li>
+    
+    <li><a href="step06.html" class=""><span class="nav-num">6</span>Single-Head Attention</a></li>
+    
+    <li><a href="step07.html" class=""><span class="nav-num">7</span>Multi-Head: Concat + Project</a></li>
+    
+    <li><a href="step08.html" class=""><span class="nav-num">8</span>Transformer Block</a></li>
+    
+    <li><a href="step09.html" class=""><span class="nav-num">9</span>Stack ×n_layer</a></li>
+    
+    <li><a href="step10.html" class=""><span class="nav-num">10</span>Final LayerNorm + LM Head → Logits</a></li>
+    
+    <li><a href="step11.html" class=""><span class="nav-num">11</span>Loss — Cross-Entropy</a></li>
+    
+    <li><a href="step12.html" class="active"><span class="nav-num">12</span>Backward Pass + Optimizer Step</a></li>
+    
+    <li><a href="step13.html" class=""><span class="nav-num">13</span>Prefill — Process the Whole Prompt in Parallel</a></li>
+    
+    <li><a href="step14.html" class=""><span class="nav-num">14</span>Incremental Decode — One New Token at a Time</a></li>
+    
+    <li><a href="step15.html" class=""><span class="nav-num">15</span>Softmax → Probability Distribution</a></li>
+    
+    <li><a href="step16.html" class=""><span class="nav-num">16</span>Sample Next Token</a></li>
+    
+    <li><a href="step17.html" class=""><span class="nav-num">17</span>Append & Loop</a></li>
+    
+    <li><a href="step18.html" class=""><span class="nav-num">18</span>KV Cache — Reuse Instead of Recompute</a></li>
+    
+    <li><a href="step19.html" class=""><span class="nav-num">19</span>Sliding Window — Cap at block_size</a></li>
+    
+    <li><a href="step20.html" class=""><span class="nav-num">20</span>Loop Back to Decode</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← All steps</a>
+    <div class="nav-arrows">
+      <a href="step11.html" class="nav-prev">← Prev</a>
+      <span class="step-counter">Step 12 / 20</span>
+      <a href="step13.html" class="nav-next">Next →</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <h1><span class="step-badge">12</span>Backward Pass + Optimizer Step</h1>
+
+  <section class="diagram-section">
+    <div class="diagram-svg-wrap">
+      
+      <svg id="diagram-svg" viewBox="0 0 1100 380" xmlns="http://www.w3.org/2000/svg"></svg>
+      <script src="static/js/canvas2svg.js"></script>
+      <script src="static/js/tensor-box.js"></script>
+      <script src="static/js/shared-data.js"></script>
+      <script src="static/js/diagrams/step12.js"></script>
+      <script>
+        (function(){
+          const svgEl = document.getElementById('diagram-svg');
+          const ctx = new SVGCanvasContext(svgEl);
+          drawStep12(ctx, 1100, 380);
+        })();
+      </script>
+      
+    </div>
+    <div class="diagram-caption">Gradient flows backward through the exact same stack, right to left</div>
+  </section>
+
+  <section class="step-info">
+    <code class="blk">loss.backward()          # training-only
+optimizer.step()         # training-only
+optimizer.zero_grad(set_to_none=True)</code>
+    <div class="shape-line">every parameter gets a same-shape gradient buffer</div>
+    <p>This is the <b>actual dividing line</b> between training and inference — not the shape of any tensor, but whether these three lines run. <code class="inline">model.train()</code> additionally enables Dropout; <code class="inline">forward()</code>'s math is byte-for-byte identical either way.</p>
+    
+    <div class="aside normal"><b>Correction: this is really THREE independent switches, easy to collapse into one.</b> It's tempting to treat "train vs. inference" as a single toggle — it's actually three, freely combinable:
+      <pre>Switch 1: does loss get computed?  — ONLY depends on whether targets is passed (step 11's `if targets is None`)
+Switch 2: is Dropout on?           — ONLY depends on model.train() / model.eval(), unrelated to targets
+Switch 3: do weights get updated?  — ONLY depends on calling loss.backward() + optimizer.step()</pre>
+      The combination that matters most in practice — <b>computing validation loss</b> — uses all three independently:
+      <pre>model.eval()                              # switch 2: dropout OFF
+with torch.no_grad():
+    logits, loss = model(xb_val, yb_val)  # switch 1: targets passed → loss IS computed
+    # backward()/step() never called here — switch 3: weights stay frozen</pre>
+      "Can a loss be computed" and "train vs. eval mode" are genuinely independent questions — eval mode can still compute a real loss (used to monitor overfitting), it just won't update anything from it.</div>
+    
+    <div class="aside normal"><b>Correction: <code class="inline">loss.backward()</code> and <code class="inline">optimizer.step()</code> are two separate steps, not one.</b> <code class="inline">backward()</code> only computes gradients and stores them in each parameter's <code class="inline">.grad</code> — <b>at the instant it returns, every weight's actual value is still completely unchanged</b>. <code class="inline">optimizer.step()</code> is the line that actually reads <code class="inline">.grad</code> and modifies the weight values. This is exactly why the training loop always writes both lines, never one alone: without <code class="inline">backward()</code>, <code class="inline">step()</code> has no gradient to act on; without <code class="inline">step()</code>, the computed gradient is wasted — weights never move.</div>
+    
+    <div class="aside warn"><b>Why training needs so much more GPU memory (unrelated to KV Cache):</b> backprop must retain every layer's intermediate activations until gradients are computed; every parameter needs a same-size gradient buffer; the optimizer (Adam) needs ~2 more momentum buffers per parameter. Altogether this is typically <b>3-4× the model's own parameter memory</b> — training never even uses KV Cache, so caching is not the explanation here.</div>
+    
+    <div class="aside warn"><b>Reality check for this notebook:</b> the loop above trains <code class="inline">m</code> — the small, separately-defined <b>pure bigram</b> model (<code class="inline">nn.Embedding(vocab_size, vocab_size)</code>, no attention at all). It's a different variable from the <code class="inline">model</code> used in steps 3-10 (the one with n_embd/Blocks) — that one is only ever forward-passed once, never trained, in this notebook. Same loop structure would train the full model too, just swapping <code class="inline">m</code> for <code class="inline">model</code>.</div>
+    
+  </section>
+
+  
+  <div class="code-panel">
+    <div class="code-title"><span>full source — <b>training loop</b> (gpt-dev.ipynb)</span><span>10,000 steps</span></div>
+    <pre>optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
+
+for steps in range(10000): # increase number of steps for good results...
+    xb, yb = get_batch('train')          # step 2, every iteration
+    logits, loss = m(xb, yb)             # forward pass, step 11 computes loss
+<span class="hl">    optimizer.zero_grad(set_to_none=True)</span>
+<span class="hl">    loss.backward()</span>
+<span class="hl">    optimizer.step()</span>
+
+print(loss.item())</pre>
+  </div>
+  
+
+  
+  <div class="internals"><b>PyTorch internals:</b> <code class="inline">optimizer.zero_grad(set_to_none=True)</code> sets each parameter's <code class="inline">.grad</code> to <code class="inline">None</code> rather than zeroing it in place — slightly faster, and lets PyTorch skip a memory write. <code class="inline">loss.backward()</code> walks the autograd graph built during the forward pass and accumulates gradients into <code class="inline">.grad</code>. <code class="inline">optimizer.step()</code> (AdamW) then updates every parameter using its gradient plus two running-average buffers (momentum + variance) per parameter — this is exactly the "~2 extra buffers" referenced above.</div>
+  
+
+  
+  <section class="source-panel jupyter-panel">
+    <h2>📓 Jupyter source <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>cell <code>b3da3e50</code></summary>
+      <div class="hl-code"><pre><span></span><span class="c1"># create a PyTorch optimizer</span>
+<span class="n">optimizer</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">optim</span><span class="o">.</span><span class="n">AdamW</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">parameters</span><span class="p">(),</span> <span class="n">lr</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">)</span>
+</pre></div>
+
+    </details>
+    
+    <details >
+      <summary>cell <code>683c4764</code></summary>
+      <div class="hl-code"><pre><span></span><span class="n">batch_size</span> <span class="o">=</span> <span class="mi">32</span>
+<span class="k">for</span> <span class="n">steps</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10000</span><span class="p">):</span> <span class="c1"># increase number of steps for good results...</span>
+
+    <span class="c1"># sample a batch of data</span>
+    <span class="n">xb</span><span class="p">,</span> <span class="n">yb</span> <span class="o">=</span> <span class="n">get_batch</span><span class="p">(</span><span class="s1">&#39;train&#39;</span><span class="p">)</span>
+
+    <span class="c1"># evaluate the loss</span>
+    <span class="n">logits</span><span class="p">,</span> <span class="n">loss</span> <span class="o">=</span> <span class="n">m</span><span class="p">(</span><span class="n">xb</span><span class="p">,</span> <span class="n">yb</span><span class="p">)</span>
+    <span class="n">optimizer</span><span class="o">.</span><span class="n">zero_grad</span><span class="p">(</span><span class="n">set_to_none</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">loss</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+    <span class="n">optimizer</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">loss</span><span class="o">.</span><span class="n">item</span><span class="p">())</span>
+</pre></div>
+
+    </details>
+    
+  </section>
+  
+
+  
+  <section class="source-panel notes-panel">
+    <h2>📝 笔记 Chinese notes <span class="source-note">— live from <code>gpt-dev.ipynb</code>, not hand-copied</span></h2>
+    
+    <details open>
+      <summary>note <code>1598ec96</code></summary>
+      <hr />
+<h2>校正：loss 之后的三个独立开关，不要混成一个</h2>
+<p>容易把&quot;训练 vs 推理&quot;当成一个单一开关，但实际上有 <strong>三个互相独立、可以自由组合</strong> 的开关：</p>
+<pre><code>开关1：算不算 loss           —— 只取决于有没有传 targets（forward() 里 if targets is None）
+开关2：Dropout 开不开         —— 只取决于 model.train() / model.eval()，和 targets 无关
+开关3：要不要更新权重          —— 只取决于有没有调用 loss.backward() + optimizer.step()
+</code></pre>
+<p>三者可以任意组合，最典型的组合是<strong>算验证集 loss</strong>：</p>
+<pre><code class="language-python">model.eval()                     # 开关2：关掉 dropout
+with torch.no_grad():
+    logits, loss = model(xb_val, yb_val)   # 开关1：传了 targets，照样算出 loss
+    # 到此为止，不调用 backward()/step()   —— 开关3：不更新权重
+</code></pre>
+<p>这说明&quot;能不能算出 loss&quot;和&quot;train/eval 模式&quot;是两件独立的事——eval 模式下一样可以传 targets 拿到 loss（用来监控有没有过拟合），只是不会再去调整权重。</p>
+<hr />
+<h2>校正：<code>loss.backward()</code> 和 <code>optimizer.step()</code> 是两个分开的步骤，不是一步完成</h2>
+<pre><code class="language-python">loss.backward()      # 只计算梯度，存进每个参数的 .grad 里 —— 此刻权重数值完全没变
+optimizer.step()     # 读取 .grad，按优化器的更新规则，真正修改权重的数值
+</code></pre>
+<p><code>backward()</code> 执行完的瞬间，模型所有权重的实际数值仍然和调用前一模一样；真正&quot;调整&quot;权重这个动作，是紧随其后的 <code>optimizer.step()</code>。这也是为什么训练循环里这两行永远分开写、缺一不可——没有 <code>backward()</code>，<code>step()</code> 没有梯度可用；没有 <code>step()</code>，算出来的梯度只是白算，权重永远不会变化。</p>
+
+    </details>
+    
+  </section>
+  
+</main>
+
+<footer>Generated from <code>gpt-pipeline.html</code> + <code>gpt-dev.ipynb</code> — see <code>SPEC.md</code>.</footer>
+</div>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(){
+    if (window.innerWidth < 981) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+})();
+</script>
+</body>
+</html>

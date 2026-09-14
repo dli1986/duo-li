@@ -9,6 +9,7 @@ export interface ProjectFrontmatter {
   technologies: string[];
   summary: string;
   repository?: string;
+  demoUrl?: string;
   order?: number;
 }
 
