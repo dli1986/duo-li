@@ -1,6 +1,6 @@
 export const siteConfig = {
   name: "Duo Li",
-  title: "Duo Li — Personal Digital Garden",
+  title: "Duo Li",
   description:
     "A long-term personal archive of projects, knowledge, photography, music and life experiences.",
   role: "Senior Software Engineer",

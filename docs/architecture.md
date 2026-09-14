@@ -1,6 +1,6 @@
 # Architecture.md
 
-# Duo Digital Garden Architecture
+# Duo Li — Architecture
 
 ## Goals
 

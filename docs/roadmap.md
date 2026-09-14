@@ -1,6 +1,6 @@
 # Roadmap.md
 
-# Duo Digital Garden Roadmap
+# Duo Li — Roadmap
 
 ## Phase 0 - Foundation
 

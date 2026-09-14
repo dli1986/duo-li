@@ -1,4 +1,4 @@
-# Duo Digital Garden
+# Duo Li
 
 Version: 0.1
 Author: Duo Li

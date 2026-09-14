@@ -1,7 +1,7 @@
 # MASTER PROJECT CONTEXT
 
 Project Name:
-Duo Digital Garden
+Duo Li
 
 Mission:
 Build a long-term personal digital archive rather than a traditional blog.
