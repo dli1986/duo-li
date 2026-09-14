@@ -1,0 +1,31 @@
+---
+title: "TwitterLearner"
+slug: "twitter-learner"
+status: "active"
+technologies:
+  - "Python"
+  - "yt-dlp"
+  - "Whisper"
+  - "LLM"
+summary: "Turns any Twitter/X video into an interactive local learning viewer — transcript, AI overview, chapters and engineering-English extraction — mirroring the youtube-digest experience for content outside YouTube."
+repository: "https://github.com/dli1986/TwitterLearner"
+---
+
+## Overview
+
+Twitter/X hosts a growing amount of high-quality technical talks and demos with no native subtitle tracks and no youtube-digest-style extension support. This tool fills that gap for content outside YouTube.
+
+## What it does
+
+1. **Downloads** the video with yt-dlp (no API key required for public tweets)
+2. **Transcribes** the audio with Whisper
+3. **Analyses** it with the same LLM prompts used by youtube-digest (chapters, key quotes, engineering English terms)
+4. **Renders** a self-contained HTML viewer replicating the youtube-digest UI — clickable timestamps, bilingual toggle, notes via localStorage
+
+## Lessons Learned
+
+_To be added._
+
+## Roadmap
+
+_To be added._
