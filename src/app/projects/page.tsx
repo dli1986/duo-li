@@ -5,6 +5,13 @@ export const metadata = {
   title: "Projects — Duo Li",
 };
 
+function formatMonthYear(dateString: string) {
+  return new Date(dateString).toLocaleDateString("en-US", {
+    month: "short",
+    year: "numeric",
+  });
+}
+
 export default function ProjectsPage() {
   const projects = getAllProjects();
 
@@ -12,18 +19,18 @@ export default function ProjectsPage() {
     <div className="mx-auto max-w-3xl px-6 py-16">
       <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
       <p className="mt-2 text-zinc-600 dark:text-zinc-400">
-        Long-term project archive.
+        Long-term project archive, newest first.
       </p>
 
-      <ul className="mt-10 space-y-8">
+      <ol className="mt-10 border-l border-black/[.08] pl-6 dark:border-white/[.12]">
         {projects.map((project) => (
-          <li key={project.slug} className="border-b border-black/[.06] pb-8 dark:border-white/[.08]">
-            <Link href={`/projects/${project.slug}`} className="text-lg font-medium hover:text-accent">
+          <li key={project.slug} className="relative mb-10 last:mb-0">
+            <span className="absolute -left-[calc(1.5rem+4px)] top-1.5 h-2 w-2 rounded-full bg-accent" />
+            <time className="text-sm text-zinc-500">{formatMonthYear(project.startDate)}</time>
+            <Link href={`/projects/${project.slug}`} className="mt-1 block text-lg font-medium hover:text-accent">
               {project.title}
             </Link>
-            <p className="mt-1 text-sm uppercase tracking-wide text-zinc-500">
-              {project.status}
-            </p>
+            <p className="text-sm uppercase tracking-wide text-zinc-500">{project.status}</p>
             <p className="mt-2 text-zinc-700 dark:text-zinc-300">{project.summary}</p>
             <div className="mt-3 flex flex-wrap gap-2">
               {project.technologies.map((tech) => (
@@ -37,7 +44,7 @@ export default function ProjectsPage() {
             </div>
           </li>
         ))}
-      </ul>
+      </ol>
     </div>
   );
 }

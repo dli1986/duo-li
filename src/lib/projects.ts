@@ -10,7 +10,7 @@ export interface ProjectFrontmatter {
   summary: string;
   repository?: string;
   demoUrl?: string;
-  order?: number;
+  startDate: string;
 }
 
 export interface ProjectEntry extends ProjectFrontmatter {
@@ -19,7 +19,7 @@ export interface ProjectEntry extends ProjectFrontmatter {
 
 export function getAllProjects(): ProjectEntry[] {
   return readMdxCollection<ProjectFrontmatter>("projects").sort(
-    (a, b) => (a.order ?? 0) - (b.order ?? 0)
+    (a, b) => +new Date(b.startDate) - +new Date(a.startDate)
   );
 }
 
