@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
-import { MDXRemote } from "next-mdx-remote/rsc";
 import Link from "next/link";
+import { Prose } from "@/components/Prose";
 import { getAllKnowledge, getKnowledgeBySlug } from "@/lib/knowledge";
 
 export function generateStaticParams() {
@@ -47,9 +47,7 @@ export default async function KnowledgeEntryPage({
         ))}
       </div>
 
-      <div className="prose prose-zinc mt-10 max-w-none dark:prose-invert">
-        <MDXRemote source={entry.content} />
-      </div>
+      <Prose source={entry.content} className="mt-10" />
     </article>
   );
 }

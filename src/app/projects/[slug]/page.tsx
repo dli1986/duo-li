@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { MDXRemote } from "next-mdx-remote/rsc";
+import { Prose } from "@/components/Prose";
 import { getAllProjects, getProjectBySlug } from "@/lib/projects";
 
 export async function generateStaticParams() {
@@ -71,9 +71,7 @@ export default async function ProjectPage({
         </a>
       )}
 
-      <div className="prose prose-zinc mt-10 max-w-none dark:prose-invert">
-        <MDXRemote source={project.content} />
-      </div>
+      <Prose source={project.content} className="mt-10" />
     </article>
   );
 }

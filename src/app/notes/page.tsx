@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { MDXRemote } from "next-mdx-remote/rsc";
+import { Prose } from "@/components/Prose";
 import { ComingSoon } from "@/components/ComingSoon";
 import { getAllNotes } from "@/lib/notes";
 
@@ -36,9 +36,7 @@ export default function NotesPage() {
               {new Date(note.timestamp).toLocaleDateString()}
             </time>
             {note.title && <h2 className="mt-1 text-lg font-medium">{note.title}</h2>}
-            <div className="prose prose-zinc prose-sm mt-2 max-w-none dark:prose-invert">
-              <MDXRemote source={note.content} />
-            </div>
+            <Prose source={note.content} className="prose-sm mt-2" />
             <div className="mt-3 flex flex-wrap gap-2">
               {note.tags.map((tag) => (
                 <Link
