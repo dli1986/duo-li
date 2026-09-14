@@ -28,7 +28,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     >
       <body className="flex min-h-full flex-col bg-background text-foreground font-sans">
         <SiteHeader />
-        <main className="flex-1">{children}</main>
+        <main className="flex-1" data-pagefind-body>
+          {children}
+        </main>
         <SiteFooter />
       </body>
     </html>

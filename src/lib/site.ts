@@ -7,6 +7,12 @@ export const siteConfig = {
   tagline: "Systems • AI • Photography • Music",
 };
 
+export const socialLinks = {
+  github: "https://github.com/dli1986",
+  linkedin: "",
+  rss: "/rss.xml",
+};
+
 export interface NavItem {
   label: string;
   href: string;
@@ -23,6 +29,7 @@ export const navItems: NavItem[] = [
   { label: "Reading", href: "/reading", description: "Books and reflections" },
   { label: "Career", href: "/career", description: "Professional profile" },
   { label: "About", href: "/about", description: "Personal background" },
+  { label: "Search", href: "/search", description: "Search all content" },
 ];
 
 export const currentFocus = [
