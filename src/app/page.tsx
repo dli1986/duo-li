@@ -3,8 +3,8 @@ import { getAllProjects } from "@/lib/projects";
 import { Section } from "@/components/Section";
 import { currentFocus, siteConfig } from "@/lib/site";
 
-export default function Home() {
-  const projects = getAllProjects();
+export default async function Home() {
+  const projects = await getAllProjects();
 
   return (
     <div className="mx-auto max-w-3xl px-6">

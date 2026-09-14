@@ -2,8 +2,9 @@ import { notFound } from "next/navigation";
 import { MDXRemote } from "next-mdx-remote/rsc";
 import { getAllProjects, getProjectBySlug } from "@/lib/projects";
 
-export function generateStaticParams() {
-  return getAllProjects().map((project) => ({ slug: project.slug }));
+export async function generateStaticParams() {
+  const projects = await getAllProjects();
+  return projects.map((project) => ({ slug: project.slug }));
 }
 
 export async function generateMetadata({
@@ -12,7 +13,7 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const project = getProjectBySlug(slug);
+  const project = await getProjectBySlug(slug);
   return { title: project ? `${project.title} — Duo Li` : "Project" };
 }
 
@@ -22,7 +23,7 @@ export default async function ProjectPage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const project = getProjectBySlug(slug);
+  const project = await getProjectBySlug(slug);
 
   if (!project) {
     notFound();

@@ -12,8 +12,8 @@ function formatMonthYear(dateString: string) {
   });
 }
 
-export default function ProjectsPage() {
-  const projects = getAllProjects();
+export default async function ProjectsPage() {
+  const projects = await getAllProjects();
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-16">
