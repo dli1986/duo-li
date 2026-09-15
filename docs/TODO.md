@@ -20,7 +20,7 @@ Living status doc — what's actually live, what's designed-but-not-built, and w
 | Notes | Pipeline built, **0 entries** — still renders the `ComingSoon` stub |
 | Reading | Pipeline built, **0 entries** — still renders the `ComingSoon` stub |
 | Music | Pipeline built, **1 real entry** (`si-shi-gu-ren-lai.mdx`, sourced from verified MusicBrainz data). Site-wide BGM player component exists but is inert in production (see "Blocked" below) |
-| Photography | Still the `ComingSoon` stub. About to be designed (this session) |
+| Photography | Built, **1 real entry** (`gan-hai.mdx`). Grid gallery + detail page with EXIF, images hosted on Cloudflare R2 (`duo-li-media` bucket, public dev URL). Export pipeline: `duo-nas/scripts/export-photos/upload_photo.py` |
 | Career | Still the `ComingSoon` stub. Blocked on user providing real work-history data — do not fabricate |
 | Tags, Search (Pagefind) | Built and working across Knowledge/Notes/Reading |
 
@@ -31,18 +31,20 @@ Living status doc — what's actually live, what's designed-but-not-built, and w
 - Project `startDate` is optional — omit it and set `repository` (a github.com URL) to auto-fetch the real repo creation date at build time instead of guessing
 - New Knowledge articles: user points to a specific file (usually somewhere under `C:\ObsidianNote\PKG` or `PKG-Wiki`), agent reads it, picks one `category`, extracts `tags`, strips any PII (personal note sources sometimes have work-email-bearing metadata — strip it), fixes Obsidian-specific formatting artifacts, writes the MDX. One at a time, manual curation, never bulk import (privacy — PKG contains mixed-sensitivity content like resume/private notes).
 - `duo-nas` acquires audio via `scripts/acquire/acquire.py` (yt-dlp, own `.venv`), gets real composer/lyricist/etc. via `scripts/export-music/musicbrainz_lookup.py` (MusicBrainz API — free, no token needed, just needs a descriptive User-Agent).
+- `duo-nas` exports photos via `scripts/export-photos/upload_photo.py` (own `.venv`): reads EXIF, generates a capped-2400px WebP thumbnail (originals never leave the machine), uploads to Cloudflare R2 (`duo-li-media` bucket) via boto3's S3-compatible client, writes `content/photos/<slug>.mdx` into the sibling site repo.
+- **Known gotcha (fixed once, could recur)**: both export scripts assumed the sibling site repo is checked out as a folder literally named `duo-li`, but the real local clone on this machine is `Duo-digital-garden`. Both scripts now auto-detect the real folder (checks for `package.json`, tries `Duo-digital-garden` then `duo-li`, override via `DUO_LI_REPO_DIR` env var if needed). Also: use `json.dumps(value, ensure_ascii=False)` for any CJK frontmatter values, or Chinese text gets written as unreadable `\uXXXX` escapes.
 
 ## Open decisions / blocked items — read before resuming
 
 1. **BGM public playback — BLOCKED on this machine, not just risky.** Corporate laptop: tailscale.com and Cloudflare Tunnel docs are network-blocked, and installing unauthorized tunnel software isn't allowed anyway. No path forward here until either (a) testing from a personal device/network, or (b) real always-on NAS hardware (a personal device). Do not suggest resuming without the user raising it first.
-2. **Photography module — about to be designed.** User has real local photos as source material. Open question raised: does Photography face the same kind of access-blocker as the BGM/Tailscale situation, specifically around Cloudflare R2 (needs a Cloudflare account + `dash.cloudflare.com` access to create a bucket/API token — check whether that specific subdomain is blocked, separate question from the tunnel-software block). Unlike the BGM case, uploading to R2 is a plain HTTPS API call (S3-compatible), not "tunnel/remote-access software," so it's a different risk category than Tailscale/Cloudflared even if related Cloudflare surfaces are involved — needs its own check, don't assume it's blocked just because Tailscale/Cloudflare Tunnel were.
+2. **Photography module — resolved, not blocked.** Cloudflare R2 dashboard access was not blocked (different risk category than Tailscale/Cloudflare Tunnel — plain HTTPS S3-compatible API calls, no tunnel software). Bucket `duo-li-media` created, public dev URL enabled, first real photo (`gan-hai`) uploaded and live end-to-end.
 3. **Custom domain** — deferred, not urgent, revisit whenever the user wants.
 4. **Career page** — waiting on the user's real work history; don't fabricate.
 5. **PKG/PKG-Wiki → Knowledge pipeline** — deliberately manual/curated, one article at a time. Not automating this (see session notes on why: confidence score ≠ safe-to-publish).
 
 ## Next candidate entry points (pick one, don't guess which)
 
-- Design + start building the Photography module (pending the R2 access question above)
+- Add more Photography entries (real pipeline now proven end-to-end)
 - Add a second Knowledge article
 - Start populating Notes or Reading
 - Revisit custom domain
