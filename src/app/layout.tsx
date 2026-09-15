@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { SiteHeader } from "@/components/SiteHeader";
 import { SiteFooter } from "@/components/SiteFooter";
+import { BgmPlayer } from "@/components/BgmPlayer";
 import { siteConfig } from "@/lib/site";
 
 const geistSans = Geist({
@@ -32,6 +33,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           {children}
         </main>
         <SiteFooter />
+        <BgmPlayer />
       </body>
     </html>
   );
