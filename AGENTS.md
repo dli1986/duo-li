@@ -2,6 +2,7 @@
 
 Before making implementation decisions read:
 
+0. TODO.md (current status, what's live vs stub, open decisions — read this first)
 1. vision.md
 2. spec.md
 3. architecture.md
