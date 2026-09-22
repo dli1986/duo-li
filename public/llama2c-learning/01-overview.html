@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -52,7 +60,7 @@
     <a href="index.html" class="nav-home">← 目录</a>
     <div class="nav-arrows">
       <span class="nav-prev disabled">← 上一节</span>
-      <span class="page-counter">1 / 12</span>
+      <span class="page-counter">1 / 16</span>
       <a href="02-tokenizer.html" class="nav-next">下一节 →</a>
     </div>
   </nav>
@@ -62,6 +70,23 @@
   <div class="page-prose">
     <h2>一句话概括</h2>
 <p><code>stories15M.bin</code> 是 Karpathy 用仓库自带的 <code>train.py</code> 在 TinyStories 数据集上训练、再用 <code>export.py</code> 导出的 checkpoint；执行 <code>./run stories15M.bin</code> 是<strong>一次推理</strong>（自回归生成），不是训练。命令行打印的 <code>achieved tok/s</code> 是推理吞吐量，不是训练速度。</p>
+<p><code>run.c</code> 的 <code>main()</code> 就是整份笔记要通读的全部内容的入口——四行代码，对应下面四个板块要讲的四件事：</p>
+<div class="code-panel"><div class="code-title">run.c -- main(): 整条推理链路的真实入口</div><pre class="hl-code"><span class="c1">// build the Transformer via the model .bin file</span>
+<span class="n">Transformer</span><span class="w"> </span><span class="n">transformer</span><span class="p">;</span>
+<span class="hll"><span class="n">build_transformer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">transformer</span><span class="p">,</span><span class="w"> </span><span class="n">checkpoint_path</span><span class="p">);</span>
+</span>
+<span class="c1">// build the Tokenizer via the tokenizer .bin file</span>
+<span class="hll"><span class="n">Tokenizer</span><span class="w"> </span><span class="n">tokenizer</span><span class="p">;</span>
+</span><span class="n">build_tokenizer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tokenizer</span><span class="p">,</span><span class="w"> </span><span class="n">tokenizer_path</span><span class="p">,</span><span class="w"> </span><span class="n">transformer</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">vocab_size</span><span class="p">);</span>
+
+<span class="hll"><span class="c1">// build the Sampler</span>
+</span><span class="n">Sampler</span><span class="w"> </span><span class="n">sampler</span><span class="p">;</span>
+<span class="n">build_sampler</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sampler</span><span class="p">,</span><span class="w"> </span><span class="n">transformer</span><span class="p">.</span><span class="n">config</span><span class="p">.</span><span class="n">vocab_size</span><span class="p">,</span><span class="w"> </span><span class="n">temperature</span><span class="p">,</span><span class="w"> </span><span class="n">topp</span><span class="p">,</span><span class="w"> </span><span class="n">rng_seed</span><span class="p">);</span>
+
+<span class="hll"><span class="c1">// run!</span>
+</span><span class="n">generate</span><span class="p">(</span><span class="o">&amp;</span><span class="n">transformer</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">tokenizer</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">sampler</span><span class="p">,</span><span class="w"> </span><span class="n">prompt</span><span class="p">,</span><span class="w"> </span><span class="n">steps</span><span class="p">);</span>
+</pre></div>
+<p><code>build_transformer</code>（mmap 权重）、<code>build_tokenizer</code>（读词表）、<code>build_sampler</code>（采样超参数）、<code>generate</code>（逐 token 推理循环）——本站接下来每一页，都是在拆解这四行代码背后各自的真实实现。</p>
 <h2>完整链路</h2>
 <div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 600" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
   <defs>

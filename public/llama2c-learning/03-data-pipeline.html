@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -52,7 +60,7 @@
     <a href="index.html" class="nav-home">← 目录</a>
     <div class="nav-arrows">
       <a href="02-tokenizer.html" class="nav-prev">← 上一节</a>
-      <span class="page-counter">3 / 12</span>
+      <span class="page-counter">3 / 16</span>
       <a href="04-pytorch-model.html" class="nav-next">下一节 →</a>
     </div>
   </nav>
@@ -67,12 +75,27 @@
 <li><strong><code>train_vocab(vocab_size)</code></strong>：<strong>可选</strong>，只有 <code>vocab_source=&quot;custom&quot;</code> 时才需要——用 <code>SentencePieceTrainer</code> 在语料上<strong>训练</strong>一套新的 BPE 子词规则，<code>vocab_size</code> 是<strong>设定的目标</strong>，不是数出来的。默认 <code>vocab_source=&quot;llama2&quot;</code> 时<strong>跳过这一步</strong>，直接用 Meta 官方 <code>tokenizer.model</code>（32000 token）。</li>
 <li><strong><code>pretokenize(vocab_size)</code></strong>：调用 <code>process_shard</code> 把每个 shard 的故事文本编码成 token id，写成 <code>dataXX.bin</code>。</li>
 </ol>
-<h2><code>process_shard</code>：并行处理 50 个 shard</h2>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="n">fun</span> <span class="o">=</span> <span class="n">partial</span><span class="p">(</span><span class="n">process_shard</span><span class="p">,</span> <span class="n">vocab_size</span><span class="o">=</span><span class="n">vocab_size</span><span class="p">)</span>   <span class="c1"># 只是凑参数个数，给 executor.map 用</span>
-<span class="k">with</span> <span class="n">ProcessPoolExecutor</span><span class="p">()</span> <span class="k">as</span> <span class="n">executor</span><span class="p">:</span>
-    <span class="n">executor</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">fun</span><span class="p">,</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">shard_filenames</span><span class="p">))</span>       <span class="c1"># 真正的并行在这里（多进程绕过 GIL）</span>
+<h2><code>process_shard</code> 与 <code>pretokenize</code>：并行处理 50 个 shard</h2>
+<div class="code-panel"><div class="code-title">tinystories.py -- pretokenize(): 多进程调度</div><pre class="hl-code"><span class="k">def</span><span class="w"> </span><span class="nf">pretokenize</span><span class="p">(</span><span class="n">vocab_size</span><span class="p">):</span>
+    <span class="n">data_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">DATA_CACHE_DIR</span><span class="p">,</span> <span class="s2">&quot;TinyStories_all_data&quot;</span><span class="p">)</span>
+    <span class="n">shard_filenames</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">glob</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">data_dir</span><span class="p">,</span> <span class="s2">&quot;*.json&quot;</span><span class="p">)))</span>
+<span class="hll">    <span class="n">fun</span> <span class="o">=</span> <span class="n">partial</span><span class="p">(</span><span class="n">process_shard</span><span class="p">,</span> <span class="n">vocab_size</span><span class="o">=</span><span class="n">vocab_size</span><span class="p">)</span>
+</span><span class="hll">    <span class="k">with</span> <span class="n">ProcessPoolExecutor</span><span class="p">()</span> <span class="k">as</span> <span class="n">executor</span><span class="p">:</span>
+</span>        <span class="n">executor</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">fun</span><span class="p">,</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">shard_filenames</span><span class="p">))</span>
 </pre></div>
-</code></pre>
+<div class="code-panel"><div class="code-title">tinystories.py -- process_shard(): 单个 shard 的真实工作</div><pre class="hl-code"><span class="k">def</span><span class="w"> </span><span class="nf">process_shard</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="n">vocab_size</span><span class="p">):</span>
+    <span class="n">shard_id</span><span class="p">,</span> <span class="n">shard</span> <span class="o">=</span> <span class="n">args</span>
+    <span class="n">tokenizer_model</span> <span class="o">=</span> <span class="n">get_tokenizer_model_path</span><span class="p">(</span><span class="n">vocab_size</span><span class="p">)</span>
+    <span class="n">enc</span> <span class="o">=</span> <span class="n">Tokenizer</span><span class="p">(</span><span class="n">tokenizer_model</span><span class="p">)</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">shard</span><span class="p">,</span> <span class="s2">&quot;r&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+    <span class="n">all_tokens</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="hll">    <span class="k">for</span> <span class="n">example</span> <span class="ow">in</span> <span class="n">tqdm</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">position</span><span class="o">=</span><span class="n">shard_id</span><span class="p">):</span>
+</span>        <span class="n">text</span> <span class="o">=</span> <span class="n">example</span><span class="p">[</span><span class="s2">&quot;story&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+        <span class="n">tokens</span> <span class="o">=</span> <span class="n">enc</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">text</span><span class="p">,</span> <span class="n">bos</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">eos</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="n">all_tokens</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span>
+    <span class="n">all_tokens</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">all_tokens</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint16</span><span class="p">)</span>
+</pre></div>
 <div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 480" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
   <defs>
     <marker id="ar3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -138,18 +161,24 @@
 <li>每条故事编码时 <code>enc.encode(text, bos=True, eos=False)</code>——<strong>只加 BOS，不加 EOS</strong>。50 个 <code>.json</code> → 50 个 <code>.bin</code>，一一对应。</li>
 </ul>
 <h2><code>PretokDataset</code>：对应 nanoGPT 的 <code>get_batch()</code></h2>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="n">m</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">memmap</span><span class="p">(</span><span class="n">shard</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint16</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s2">&quot;r&quot;</span><span class="p">)</span>     <span class="c1"># 又是 mmap！跟 run.c 读权重同一手法</span>
-<span class="n">num_batches</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">m</span><span class="p">)</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span> <span class="o">-</span> <span class="mi">1</span>          <span class="c1"># 实际是&quot;能切出多少个样本&quot;</span>
-<span class="n">ixs</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">num_batches</span><span class="p">));</span> <span class="n">rng</span><span class="o">.</span><span class="n">shuffle</span><span class="p">(</span><span class="n">ixs</span><span class="p">)</span>
-<span class="k">for</span> <span class="n">ix</span> <span class="ow">in</span> <span class="n">ixs</span><span class="p">:</span>
-    <span class="n">start</span> <span class="o">=</span> <span class="n">ix</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span>
-    <span class="n">end</span> <span class="o">=</span> <span class="n">start</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span> <span class="o">+</span> <span class="mi">1</span>                <span class="c1"># 多取1个token，为了同时切出 x 和 y</span>
-    <span class="n">chunk</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">((</span><span class="n">m</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">])</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">))</span>
-    <span class="n">x</span> <span class="o">=</span> <span class="n">chunk</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>   <span class="c1"># 长度 = max_seq_len</span>
-    <span class="n">y</span> <span class="o">=</span> <span class="n">chunk</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span>    <span class="c1"># 长度 = max_seq_len（和 x 等长，只是错位1位）</span>
-    <span class="k">yield</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span>
+<div class="code-panel"><div class="code-title">tinystories.py -- PretokDataset.__iter__()</div><pre class="hl-code"><span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+    <span class="n">rng</span><span class="o">.</span><span class="n">shuffle</span><span class="p">(</span><span class="n">shard_filenames</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">shard</span> <span class="ow">in</span> <span class="n">shard_filenames</span><span class="p">:</span>
+        <span class="c1"># open the dataset for reading but keep it on disk with memmap</span>
+        <span class="n">m</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">memmap</span><span class="p">(</span><span class="n">shard</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint16</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s2">&quot;r&quot;</span><span class="p">)</span>
+<span class="hll">        <span class="n">num_batches</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">m</span><span class="p">)</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span>
+</span>        <span class="n">num_batches</span> <span class="o">-=</span> <span class="mi">1</span>  <span class="c1"># drop the last partial batch</span>
+        <span class="n">ixs</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">num_batches</span><span class="p">))</span>
+        <span class="n">rng</span><span class="o">.</span><span class="n">shuffle</span><span class="p">(</span><span class="n">ixs</span><span class="p">)</span>
+<span class="hll">        <span class="k">for</span> <span class="n">ix</span> <span class="ow">in</span> <span class="n">ixs</span><span class="p">:</span>
+</span><span class="hll">            <span class="n">start</span> <span class="o">=</span> <span class="n">ix</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span>
+</span>            <span class="n">end</span> <span class="o">=</span> <span class="n">start</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span> <span class="o">+</span> <span class="mi">1</span>
+            <span class="c1"># calling .astype will copy the data into a new numpy array, now in RAM</span>
+            <span class="n">chunk</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">((</span><span class="n">m</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">])</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">))</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="n">chunk</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+            <span class="n">y</span> <span class="o">=</span> <span class="n">chunk</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span>
+            <span class="k">yield</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span>
 </pre></div>
-</code></pre>
 <table>
 <thead>
 <tr>
@@ -173,15 +202,19 @@
 </table>
 <p><strong>关键点：<code>max_seq_len</code> 切分对 BOS（<code>&lt;s&gt;</code>）完全&quot;视而不见&quot;</strong>——纯粹按固定长度机械切片，不关心切出来的 chunk 是不是跨越了故事边界。一个训练样本完全可能是&quot;故事 A 结尾 + BOS + 故事 B 开头&quot;拼在一起，模型要自己从 BOS 这个特殊 token 学会&quot;这里是新上下文的开始&quot;。</p>
 <h2><code>Task.iter_batches</code>：Python 工程模式集合</h2>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">Task</span><span class="p">:</span>
+<div class="code-panel"><div class="code-title">tinystories.py -- Task.iter_batches()</div><pre class="hl-code"><span class="k">class</span><span class="w"> </span><span class="nc">Task</span><span class="p">:</span>
+
     <span class="nd">@staticmethod</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">iter_batches</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">device</span><span class="p">,</span> <span class="n">num_workers</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="o">**</span><span class="n">dataset_kwargs</span><span class="p">):</span>
         <span class="n">ds</span> <span class="o">=</span> <span class="n">PretokDataset</span><span class="p">(</span><span class="o">**</span><span class="n">dataset_kwargs</span><span class="p">)</span>
-        <span class="n">dl</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">DataLoader</span><span class="p">(</span><span class="n">ds</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">pin_memory</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">num_workers</span><span class="o">=</span><span class="n">num_workers</span><span class="p">)</span>
-        <span class="k">for</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="ow">in</span> <span class="n">dl</span><span class="p">:</span>
-            <span class="k">yield</span> <span class="n">x</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">,</span> <span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span> <span class="n">y</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">,</span> <span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">dl</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">DataLoader</span><span class="p">(</span>
+            <span class="n">ds</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">pin_memory</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">num_workers</span><span class="o">=</span><span class="n">num_workers</span>
+<span class="hll">        <span class="p">)</span>
+</span><span class="hll">        <span class="k">for</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="ow">in</span> <span class="n">dl</span><span class="p">:</span>
+</span>            <span class="n">x</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">,</span> <span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="n">y</span> <span class="o">=</span> <span class="n">y</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">,</span> <span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="k">yield</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span>
 </pre></div>
-</code></pre>
 <ul>
 <li><strong><code>@staticmethod</code></strong>：不需要 <code>self</code>，<code>Task</code> 是纯粹的&quot;命名空间类&quot;（不是 GoF 工厂模式），从未被实例化，只是把函数组织在一个有意义的名字下。</li>
 <li><strong><code>**dataset_kwargs</code></strong>：关键字变长参数，用来<strong>透传</strong>——<code>iter_batches</code> 不用把 <code>PretokDataset</code> 需要的 <code>split</code>/<code>max_seq_len</code> 等参数名再抄一遍，直接原样转发，DRY 原则。</li>

@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -51,7 +59,7 @@
   <h1 class="site-title">llama2.c 学习笔记</h1>
 </header>
 <main>
-  <p class="site-subtitle">跟随 Andrej Karpathy 的 <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 项目，以 C/C++ 工程视角通读 <code>run.c</code>，并与 <code>train.py</code>/<code>model.py</code>/<code>tinystories.py</code>/<code>tokenizer.py</code> 及 nanoGPT 逐项对照。共 12 页，每页一个主题，配合手绘 SVG 图解。</p>
+  <p class="site-subtitle">跟随 Andrej Karpathy 的 <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 项目，以 C/C++ 工程视角通读 <code>run.c</code>，并与 <code>train.py</code>/<code>model.py</code>/<code>tinystories.py</code>/<code>tokenizer.py</code> 及 nanoGPT 逐项对照。共 16 页，每页一个主题，配合手绘 SVG 图解。</p>
   <div class="scope-note">
     <b>学习状态说明：</b> 本站内容完全基于作者本人真实的学习笔记（<code>STUDY_NOTES.md</code>）整理，不做超出笔记范围的推测或幻觉性总结。学习目前进行到 <code>model.py</code> 前向传播、RoPE 数学推导、C 端内存布局与工程取舍这一阶段；<code>run.c</code> 的解码采样细节、<code>train.py</code> 学习率调度/优化器分组、PyTorch autograd 反向传播机制等尚未深入，见最后一页「学习进度与下一步」的诚实清单。
   </div>
@@ -77,9 +85,17 @@
     
     <li><a href="10-training-engineering.html"><span class="step-badge">10</span><span>训练工程细节：pin_memory 与 configurator.py 的取舍<span class="step-sub">DMA 的硬件约束，以及 Karpathy 明知丑陋仍选择的 hack</span></span></a></li>
     
-    <li><a href="11-comparison-table.html"><span class="step-badge">11</span><span>nanoGPT vs llama2.c 全流程对照<span class="step-sub">12 个维度，从数据源到推理生成逐项对比</span></span></a></li>
+    <li><a href="11-sampling-strategies.html"><span class="step-badge">11</span><span>run.c 采样策略：从 greedy 到 nucleus sampling<span class="step-sub">temperature/top-p 真实实现，对比 model.py 的 top-k</span></span></a></li>
     
-    <li><a href="12-learning-status.html"><span class="step-badge">12</span><span>学习进度与下一步<span class="step-sub">诚实标注：哪些已经吃透，哪些还没深入</span></span></a></li>
+    <li><a href="12-lr-schedule-loss.html"><span class="step-badge">12</span><span>学习率调度与损失评估：get_lr / estimate_loss<span class="step-sub">warmup + 余弦衰减，多批平均换取更稳的 loss 估计</span></span></a></li>
+    
+    <li><a href="13-optimizer-mfu.html"><span class="step-badge">13</span><span>优化器配置与 MFU 估算<span class="step-sub">按维度分组 weight decay，PaLM 论文的 FLOPs 公式</span></span></a></li>
+    
+    <li><a href="14-autograd-mechanism.html"><span class="step-badge">14</span><span>PyTorch autograd 机制：loss.backward() 背后发生了什么<span class="step-sub">计算图、grad_fn、链式法则，以及混合精度的 GradScaler</span></span></a></li>
+    
+    <li><a href="15-comparison-table.html"><span class="step-badge">15</span><span>nanoGPT vs llama2.c 全流程对照<span class="step-sub">12 个维度，从数据源到推理生成逐项对比</span></span></a></li>
+    
+    <li><a href="16-learning-status.html"><span class="step-badge">16</span><span>学习进度与下一步<span class="step-sub">诚实标注：哪些已经吃透，哪些还没深入</span></span></a></li>
     
   </ol>
   <p class="source-links">源笔记：<code>/home/dli/llama2.c/STUDY_NOTES.md</code>（WSL，随学习持续更新）&nbsp;·&nbsp;姊妹项目：<a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></p>

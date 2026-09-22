@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class="active"><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class="active"><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -51,14 +59,14 @@
   <nav class="topnav">
     <a href="index.html" class="nav-home">← 目录</a>
     <div class="nav-arrows">
-      <a href="10-training-engineering.html" class="nav-prev">← 上一节</a>
-      <span class="page-counter">11 / 12</span>
-      <a href="12-learning-status.html" class="nav-next">下一节 →</a>
+      <a href="14-autograd-mechanism.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">15 / 16</span>
+      <a href="16-learning-status.html" class="nav-next">下一节 →</a>
     </div>
   </nav>
 </header>
 <main>
-  <h1><span class="step-badge">11</span>nanoGPT vs llama2.c 全流程对照</h1>
+  <h1><span class="step-badge">15</span>nanoGPT vs llama2.c 全流程对照</h1>
   <div class="page-prose">
     <p>从数据源到推理生成，逐项对比 nanoGPT（<code>gpt-dev.ipynb</code>）与 llama2.c（<code>train.py</code>/<code>model.py</code>/<code>run.c</code>）在每个阶段的真实选择。</p>
 <div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 360" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">

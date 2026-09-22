@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class="active"><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -52,8 +60,8 @@
     <a href="index.html" class="nav-home">← 目录</a>
     <div class="nav-arrows">
       <a href="09-run-c-engineering.html" class="nav-prev">← 上一节</a>
-      <span class="page-counter">10 / 12</span>
-      <a href="11-comparison-table.html" class="nav-next">下一节 →</a>
+      <span class="page-counter">10 / 16</span>
+      <a href="11-sampling-strategies.html" class="nav-next">下一节 →</a>
     </div>
   </nav>
 </header>
@@ -109,55 +117,56 @@
 <p><strong>根源问题</strong>：普通（可分页）内存的虚拟地址→物理地址映射，操作系统随时可能改变（swap、内存整理）；GPU 的 DMA 引擎直接按物理地址读写，不经过 CPU——如果传输过程中物理地址被换出/挪动，DMA 会读到错误数据。</p>
 <p><strong>&quot;pinned&quot;/锁页内存的不变量</strong>：虚拟地址到物理地址的映射<strong>冻结不变</strong>。这是 DMA 能安全直接读写这块内存的前提，不是性能优化技巧，是正确性要求。</p>
 <p><strong>不锁页会发生什么——CUDA 驱动偷偷做了一次隐藏的同步拷贝</strong>：</p>
-<pre><code><div class="hl-code"><pre><span></span>普通内存 → CUDA驱动先同步拷贝到内部锁页中转缓冲区(阻塞!) → 再异步DMA到显存
-</pre></div>
-</code></pre>
+<pre class="hl-code">普通内存 → CUDA驱动先同步拷贝到内部锁页中转缓冲区(阻塞!) → 再异步DMA到显存
+</pre>
 <p><code>non_blocking=True</code> 如果源内存不是锁页的，会<strong>静默退化</strong>成同步拷贝，不报错，只是&quot;non_blocking&quot;这个提示不生效。</p>
 <p><strong><code>DataLoader(pin_memory=True)</code> 的作用</strong>：worker 进程产出的 tensor 默认是普通内存，<code>pin_memory=True</code> 让 <code>DataLoader</code> 在交给主进程前，额外拷贝一次到锁页内存——用一次确定的 CPU 开销，换取后面 <code>.to(device, non_blocking=True)</code> 能<strong>真正异步、能与 GPU 计算重叠</strong>的资格。</p>
-<p><strong>具体重叠点</strong>（<code>train.py</code>）：</p>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="k">with</span> <span class="n">ctx</span><span class="p">:</span>
-    <span class="n">logits</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">Y</span><span class="p">)</span>              <span class="c1"># GPU在算forward</span>
-    <span class="n">loss</span> <span class="o">=</span> <span class="o">...</span> <span class="o">/</span> <span class="n">gradient_accumulation_steps</span>
-<span class="n">X</span><span class="p">,</span> <span class="n">Y</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span><span class="n">train_batch_iter</span><span class="p">)</span>         <span class="c1"># 如果数据锁页,这里是真异步,不用等GPU算完</span>
-<span class="n">scaler</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">loss</span><span class="p">)</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+<p><strong>具体重叠点</strong>（<code>train.py</code> 训练主循环的真实结构）：</p>
+<div class="code-panel"><div class="code-title">train.py -- 训练循环: 异步预取与反向传播重叠</div><pre class="hl-code"><span class="k">for</span> <span class="n">micro_step</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">gradient_accumulation_steps</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">ctx</span><span class="p">:</span>
+        <span class="n">logits</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">Y</span><span class="p">)</span>
+        <span class="n">loss</span> <span class="o">=</span> <span class="n">raw_model</span><span class="o">.</span><span class="n">last_loss</span>
+<span class="hll">        <span class="n">loss</span> <span class="o">=</span> <span class="n">loss</span> <span class="o">/</span> <span class="n">gradient_accumulation_steps</span>
+</span>    <span class="c1"># immediately async prefetch next batch while model is doing the forward pass on the GPU</span>
+    <span class="n">X</span><span class="p">,</span> <span class="n">Y</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span><span class="n">train_batch_iter</span><span class="p">)</span>
+    <span class="n">scaler</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">loss</span><span class="p">)</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
 </pre></div>
-</code></pre>
-<p>意图：GPU 算当前 batch 的同时，CPU 应该已经在准备+搬运下一个 batch——这个&quot;同时&quot;能否兑现，完全取决于 <code>pin_memory</code> 有没有生效。</p>
+<p>意图：GPU 算当前 batch（<code>model(X, Y)</code>）的同时，CPU 应该已经在准备+搬运下一个 batch（第 5 行 <code>next(train_batch_iter)</code> 紧跟在 forward 之后、backward 之前调用）——这个&quot;同时&quot;能否兑现，完全取决于 <code>pin_memory</code> 有没有生效。</p>
 <h2><code>configurator.py</code>：没有 <code>main()</code>/<code>argparse</code>，靠 <code>exec</code> 就地改全局变量</h2>
 <p><strong>Karpathy 的原话——不是简单的&quot;不喜欢&quot;，是&quot;明知丑陋但主动取舍&quot;</strong>：</p>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="sd">&quot;&quot;&quot;</span>
+<div class="code-panel"><div class="code-title">configurator.py -- 模块开头的自白</div><pre class="hl-code"><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">Poor Man&#39;s Configurator. Probably a terrible idea.</span>
 <span class="sd">...</span>
 <span class="sd">I know people are not going to love this, I just really dislike configuration</span>
 <span class="sd">complexity and having to prepend config. to every single variable.</span>
 <span class="sd">&quot;&quot;&quot;</span>
 </pre></div>
-</code></pre>
 <p>他自己承认这大概率是个&quot;糟糕的主意&quot;，但<strong>更讨厌&quot;每次访问配置都要写 <code>config.xxx</code> 前缀&quot;这件事</strong>，主动选择了这个 hack，用架构上的不干净换取 <code>train.py</code> 正文里所有超参数都能直接裸写 <code>batch_size</code> 而不是 <code>config.batch_size</code>。<strong>不是为了&quot;模块化、干净&quot;</strong>——如果追求模块化/干净，用 <code>argparse</code>+<code>dataclass</code> 反而更合适；这里牺牲的恰恰是配置机制本身的规范性。</p>
 <p><strong>机制拆解</strong>：</p>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="n">config_keys</span> <span class="o">=</span> <span class="p">[</span><span class="n">k</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="nb">globals</span><span class="p">()</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
+<div class="code-panel"><div class="code-title">train.py -- config_keys 扫描 + exec() 注入</div><pre class="hl-code"><span class="n">config_keys</span> <span class="o">=</span> <span class="p">[</span><span class="n">k</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="nb">globals</span><span class="p">()</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
                <span class="k">if</span> <span class="ow">not</span> <span class="n">k</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;_&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="p">(</span><span class="nb">int</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">bool</span><span class="p">,</span> <span class="nb">str</span><span class="p">))]</span>
-<span class="n">exec</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="s2">&quot;configurator.py&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>     <span class="c1"># 关键hack</span>
-<span class="n">config</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">k</span><span class="p">]</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">config_keys</span><span class="p">}</span>
+<span class="hll"><span class="n">exec</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="s2">&quot;configurator.py&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+</span><span class="n">config</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">k</span><span class="p">]</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">config_keys</span><span class="p">}</span>
 </pre></div>
-</code></pre>
 <ul>
 <li><code>config_keys</code>：扫一遍 <code>train.py</code> 当前的全局变量，挑出&quot;简单类型&quot;的那些（即开头那一堆超参数），排除函数/模块等复杂对象，留作后面日志记录用。</li>
 <li><strong><code>exec()</code> 重要纠正</strong>：Python 内建函数 <code>exec()</code> 跟 C/POSIX 的 <code>exec</code> 系列系统调用（<code>execve</code> 等）<strong>完全不是一回事</strong>，只是同名。POSIX 的 <code>exec</code> 是&quot;用新程序镜像替换当前进程&quot;，涉及进程/内存镜像层面的操作；Python 的 <code>exec()</code> <strong>不启动任何新进程或线程</strong>，只是把一段字符串当 Python 代码，在当前解释器、当前命名空间里<strong>当场编译执行</strong>——效果上约等于把这段代码原样写在调用处，但机制上是&quot;运行时动态执行一段字符串&quot;，不是 C 的 <code>#include</code> 那种编译前文本替换，也绝非进程级操作。</li>
 <li>因为这次 <code>exec()</code> 没有传独立命名空间，它默认就在 <code>train.py</code> 自己的全局作用域里跑，所以 <code>configurator.py</code> 内部任何 <code>globals()[key] = value</code>，改的就是 <code>train.py</code> 自己的全局变量，如同代码被直接拼贴在 <code>exec</code> 那一行。</li>
 </ul>
 <p><strong><code>configurator.py</code> 内部：<code>sys.argv</code> 解析</strong>：</p>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="k">for</span> <span class="n">arg</span> <span class="ow">in</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">:]:</span>
+<div class="code-panel"><div class="code-title">configurator.py -- sys.argv 解析</div><pre class="hl-code"><span class="k">for</span> <span class="n">arg</span> <span class="ow">in</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">:]:</span>
     <span class="k">if</span> <span class="s1">&#39;=&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">arg</span><span class="p">:</span>
-        <span class="n">exec</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="n">arg</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>          <span class="c1"># 当成另一个配置文件，整个exec进来</span>
+        <span class="c1"># assume it&#39;s the name of a config file</span>
+        <span class="n">exec</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="n">arg</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
     <span class="k">else</span><span class="p">:</span>
-        <span class="n">key</span><span class="p">,</span> <span class="n">val</span> <span class="o">=</span> <span class="n">arg</span><span class="p">[</span><span class="mi">2</span><span class="p">:]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;=&#39;</span><span class="p">)</span>   <span class="c1"># --batch_size=32 这种</span>
-        <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="nb">globals</span><span class="p">():</span>             <span class="c1"># 必须是已存在的全局变量，防止手滑创建新变量</span>
-            <span class="n">attempt</span> <span class="o">=</span> <span class="n">literal_eval</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>   <span class="c1"># 字符串&quot;32&quot;解析成真正的Python int</span>
-            <span class="k">assert</span> <span class="nb">type</span><span class="p">(</span><span class="n">attempt</span><span class="p">)</span> <span class="o">==</span> <span class="nb">type</span><span class="p">(</span><span class="nb">globals</span><span class="p">()[</span><span class="n">key</span><span class="p">])</span>   <span class="c1"># 类型必须匹配</span>
+        <span class="c1"># assume it&#39;s a --key=value argument</span>
+        <span class="n">key</span><span class="p">,</span> <span class="n">val</span> <span class="o">=</span> <span class="n">arg</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;=&#39;</span><span class="p">)</span>
+<span class="hll">        <span class="n">key</span> <span class="o">=</span> <span class="n">key</span><span class="p">[</span><span class="mi">2</span><span class="p">:]</span>
+</span><span class="hll">        <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="nb">globals</span><span class="p">():</span>
+</span>            <span class="n">attempt</span> <span class="o">=</span> <span class="n">literal_eval</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>
+            <span class="k">assert</span> <span class="nb">type</span><span class="p">(</span><span class="n">attempt</span><span class="p">)</span> <span class="o">==</span> <span class="nb">type</span><span class="p">(</span><span class="nb">globals</span><span class="p">()[</span><span class="n">key</span><span class="p">])</span>
             <span class="nb">globals</span><span class="p">()[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">attempt</span>
 </pre></div>
-</code></pre>
 <ul>
 <li><code>sys.argv</code> 类似 C 的 <code>argv[]</code>（字符串列表），但没有单独的 <code>argc</code>（Python 列表自带 <code>len()</code>）。</li>
 <li><strong><code>sys.argv[0]</code> 是脚本文件名 <code>&quot;train.py&quot;</code>，不是 <code>&quot;python&quot;</code> 本身</strong>——<code>python</code> 解释器不会出现在 <code>argv</code> 里，道理类似 C 里&quot;argv[0] 是被执行的程序自己&quot;。</li>

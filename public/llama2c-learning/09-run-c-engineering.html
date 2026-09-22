@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -52,7 +60,7 @@
     <a href="index.html" class="nav-home">← 目录</a>
     <div class="nav-arrows">
       <a href="08-runstate-vs-weights.html" class="nav-prev">← 上一节</a>
-      <span class="page-counter">9 / 12</span>
+      <span class="page-counter">9 / 16</span>
       <a href="10-training-engineering.html" class="nav-next">下一节 →</a>
     </div>
   </nav>
@@ -71,6 +79,23 @@
 </ul>
 </li>
 </ul>
+<div class="code-panel"><div class="code-title">run.c -- read_checkpoint(): mmap 一整个 checkpoint 文件</div><pre class="hl-code"><span class="kt">void</span><span class="w"> </span><span class="nf">read_checkpoint</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">checkpoint</span><span class="p">,</span><span class="w"> </span><span class="n">Config</span><span class="o">*</span><span class="w"> </span><span class="n">config</span><span class="p">,</span><span class="w"> </span><span class="n">TransformerWeights</span><span class="o">*</span><span class="w"> </span><span class="n">weights</span><span class="p">,</span>
+<span class="w">                     </span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="o">**</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">ssize_t</span><span class="o">*</span><span class="w"> </span><span class="n">file_size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">FILE</span><span class="w"> </span><span class="o">*</span><span class="n">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fopen</span><span class="p">(</span><span class="n">checkpoint</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;rb&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">file</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="n">fread</span><span class="p">(</span><span class="n">config</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Config</span><span class="p">),</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">file</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">shared_weights</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">config</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">abs</span><span class="p">(</span><span class="n">config</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="p">);</span>
+<span class="w">    </span><span class="n">fseek</span><span class="p">(</span><span class="n">file</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">SEEK_END</span><span class="p">);</span>
+<span class="w">    </span><span class="o">*</span><span class="n">file_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ftell</span><span class="p">(</span><span class="n">file</span><span class="p">);</span>
+<span class="w">    </span><span class="n">fclose</span><span class="p">(</span><span class="n">file</span><span class="p">);</span>
+<span class="w">    </span><span class="o">*</span><span class="n">fd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">open</span><span class="p">(</span><span class="n">checkpoint</span><span class="p">,</span><span class="w"> </span><span class="n">O_RDONLY</span><span class="p">);</span>
+<span class="w">    </span><span class="o">*</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mmap</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">file_size</span><span class="p">,</span><span class="w"> </span><span class="n">PROT_READ</span><span class="p">,</span><span class="w"> </span><span class="n">MAP_PRIVATE</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="hll"><span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">weights_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Config</span><span class="p">)</span><span class="o">/</span><span class="k">sizeof</span><span class="p">(</span><span class="kt">float</span><span class="p">);</span>
+</span><span class="w">    </span><span class="n">memory_map_weights</span><span class="p">(</span><span class="n">weights</span><span class="p">,</span><span class="w"> </span><span class="n">config</span><span class="p">,</span><span class="w"> </span><span class="n">weights_ptr</span><span class="p">,</span><span class="w"> </span><span class="n">shared_weights</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p><code>fopen</code>+<code>fread</code> 只读了固定大小的 <code>Config</code> 头部；真正的权重数据完全靠第 13 行的 <code>mmap()</code> 登记映射，一个字节都还没被复制到堆内存——<code>memory_map_weights</code>（见「C 语言里的&quot;张量&quot;」页）拿到的 <code>weights_ptr</code> 只是这块映射内的一个偏移起点。</p>
 <div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 420" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
   <style>
     .lbl{fill:#e6edf3;font-size:10px;}
@@ -158,14 +183,23 @@
 <p><strong>在 HDD 上，这种跳跃访问会打断内核的顺序预读（readahead）优化，可能导致大量寻道，反而比 <code>read+malloc</code> 一次性顺序读整个文件更慢</strong>——这是&quot;mmap 更快&quot;这个说法容易被过度泛化的地方，它的优势场景其实是 SSD/热页缓存/多进程共享，不是任何介质下都更快。</p>
 <h2><code>run.c</code> 没有 batched prefill</h2>
 <p><code>generate()</code> 的循环<strong>每次只调用 <code>forward()</code> 处理一个 token</strong>，即使是&quot;消化 prompt&quot;阶段也是逐 token 调用、只是强制把采样结果替换成已知的下一个 prompt token：</p>
-<pre><code class="language-c"><div class="hl-code"><pre><span></span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">steps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">logits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">forward</span><span class="p">(</span><span class="n">transformer</span><span class="p">,</span><span class="w"> </span><span class="n">token</span><span class="p">,</span><span class="w"> </span><span class="n">pos</span><span class="p">);</span><span class="w">   </span><span class="c1">// 一次只处理一个token</span>
-<span class="w">    </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_prompt_tokens</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">prompt_tokens</span><span class="p">[</span><span class="n">pos</span><span class="o">+</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">sample</span><span class="p">(</span><span class="n">sampler</span><span class="p">,</span><span class="w"> </span><span class="n">logits</span><span class="p">);</span>
-<span class="w">    </span><span class="p">...</span>
+<div class="code-panel"><div class="code-title">run.c -- generate(): 逐 token 循环，无 batched prefill</div><pre class="hl-code"><span class="kt">int</span><span class="w"> </span><span class="n">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prompt_tokens</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">steps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">logits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">forward</span><span class="p">(</span><span class="n">transformer</span><span class="p">,</span><span class="w"> </span><span class="n">token</span><span class="p">,</span><span class="w"> </span><span class="n">pos</span><span class="p">);</span>
+
+<span class="hll"><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_prompt_tokens</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span class="w">        </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prompt_tokens</span><span class="p">[</span><span class="n">pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span><span class="w">   </span><span class="c1">// 仍在消化 prompt：强制用已知的下一个 token</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sample</span><span class="p">(</span><span class="n">sampler</span><span class="p">,</span><span class="w"> </span><span class="n">logits</span><span class="p">);</span><span class="w">   </span><span class="c1">// 已进入自由生成：真正采样</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">pos</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">next</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1">// BOS 终止序列</span>
+
+<span class="w">    </span><span class="n">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next</span><span class="p">;</span>
 <span class="p">}</span>
 </pre></div>
-</code></pre>
-<p>这跟生产级 LLM 推理（vLLM 等）&quot;prompt 整体 batch 过一次算出全部 KV&quot;的 prefill 优化不同——<code>run.c</code> 为了 700 行的极简目标，牺牲了这个优化。</p>
+<p>第 6 行是关键：<code>forward()</code> 每次调用只喂 1 个 token（配合 <code>pos</code> 走 KV cache 增量），无论是在&quot;重放 prompt&quot;还是&quot;自由生成&quot;阶段，调用形状完全一样——区别只在于 <code>next</code> 的来源是数组里的已知答案还是 <code>sample()</code> 的真实采样。这跟生产级 LLM 推理（vLLM 等）&quot;prompt 整体 batch 过一次算出全部 KV&quot;的 prefill 优化不同——<code>run.c</code> 为了 700 行的极简目标，牺牲了这个优化。</p>
 <div class="aside">
 <b>工程取舍的共同主线：</b>这一页三个决定（裸序列化、mmap 的真实优势场景、无 batched prefill）都指向同一件事——<code>run.c</code> 的设计目标是"最少代码看懂完整推理链路"，不是"生产级最优性能"。理解这个目标，才能正确判断哪些简化是有意为之、哪些是留给读者自己扩展的空间。
 </div>

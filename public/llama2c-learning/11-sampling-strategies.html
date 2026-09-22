@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>run.c 采样策略：从 greedy 到 nucleus sampling — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-sampling-strategies.html" class="active"><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
+    
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="10-training-engineering.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">11 / 16</span>
+      <a href="12-lr-schedule-loss.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</h1>
+  <div class="page-prose">
+    <p>这一页开始，笔记从&quot;已经学过的部分&quot;扩展到 STUDY_NOTES.md 尚未深入、但同样是真实工程实践的部分——采样策略、学习率调度、优化器配置、PyTorch autograd。内容依然完全来自 <code>llama2.c</code> 仓库的真实代码，不做脱离代码的推测。</p>
+<h2><code>run.c</code> 的 <code>Sampler</code>：三种采样策略，一层层收窄</h2>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 480" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <defs>
+    <marker id="ars1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#161b22;stroke:#30363d;stroke-width:1;}
+    .dec{fill:#1e1530;stroke:#bc8cff;stroke-width:1;}
+    .leaf{fill:#0f2415;stroke:#3fb950;stroke-width:1;}
+    .lbl{fill:#e6edf3;font-size:10.5px;}
+    .sub{fill:#8b949e;font-size:9px;font-family:'Segoe UI',sans-serif;}
+    .arrow{stroke:#58a6ff;stroke-width:1.4;fill:none;marker-end:url(#ars1);}
+    .cond{fill:#58a6ff;font-size:9px;font-family:'Segoe UI',sans-serif;}
+  </style>
+
+  <rect class="box" x="90" y="10" width="200" height="34"/>
+  <text class="lbl" x="105" y="31">sample(sampler, logits)</text>
+
+  <line class="arrow" x1="190" y1="44" x2="190" y2="72"/>
+  <rect class="dec" x="70" y="72" width="240" height="36"/>
+  <text class="lbl" x="85" y="94" fill="#bc8cff">temperature == 0 ?</text>
+
+  <line class="arrow" x1="120" y1="108" x2="80" y2="140"/>
+  <text class="cond" x="30" y="128">是（greedy）</text>
+  <rect class="leaf" x="10" y="140" width="140" height="40"/>
+  <text class="lbl" x="20" y="158" font-size="9.5" fill="#3fb950">sample_argmax()</text>
+  <text class="sub" x="20" y="172">取最大概率的 index</text>
+
+  <line class="arrow" x1="260" y1="108" x2="290" y2="140"/>
+  <text class="cond" x="290" y="128">否</text>
+  <rect class="box" x="200" y="140" width="170" height="52"/>
+  <text class="lbl" x="212" y="160" font-size="9.5">logits /= temperature</text>
+  <text class="lbl" x="212" y="176" font-size="9.5">softmax(logits) → 概率</text>
+
+  <line class="arrow" x1="285" y1="192" x2="285" y2="222"/>
+  <rect class="dec" x="180" y="222" width="200" height="36"/>
+  <text class="lbl" x="195" y="244" fill="#bc8cff" font-size="9.5">topp&lt;=0 或 topp&gt;=1 ?</text>
+
+  <line class="arrow" x1="230" y1="258" x2="200" y2="290"/>
+  <text class="cond" x="140" y="278">是（关闭 nucleus）</text>
+  <rect class="leaf" x="140" y="290" width="140" height="40"/>
+  <text class="lbl" x="150" y="308" font-size="9.5" fill="#3fb950">sample_mult()</text>
+  <text class="sub" x="150" y="322">按概率分布直接采样</text>
+
+  <line class="arrow" x1="340" y1="258" x2="340" y2="290"/>
+  <text class="cond" x="290" y="278">否</text>
+  <rect class="leaf" x="280" y="290" width="90" height="40" fill="#0f2415" stroke="#3fb950"/>
+  <text class="lbl" x="285" y="308" font-size="9" fill="#3fb950">sample_topp()</text>
+  <text class="sub" x="285" y="322" font-size="8">nucleus 采样</text>
+
+  <rect x="20" y="348" width="340" height="112" fill="#0a0e14" stroke="#30363d" rx="4"/>
+  <text class="lbl" x="35" y="368" fill="#58a6ff" font-weight="bold">sample_topp()：只在累计概率超过 topp 的最小 token 集合里采样</text>
+  <text class="sub" x="35" y="386">1. 按概率降序排序（先用 cutoff=(1-topp)/(n-1) 粗筛）</text>
+  <text class="sub" x="35" y="400">2. 累加概率，一旦超过 topp 就截断（last_idx）</text>
+  <text class="sub" x="35" y="414">3. 只在截断后的候选里按相对概率采样</text>
+  <text class="sub" x="35" y="434" fill="#f0883e">对比 model.py 的 generate()：用的是 top_k（只保留</text>
+  <text class="sub" x="35" y="448" fill="#f0883e">概率最高的 k 个），不是 top_p——两种不同的截断策略。</text>
+</svg>
+</div><div class="diagram-caption">temperature=0→贪心；否则 softmax 后走 top-p 或全概率采样</div></div>
+<div class="code-panel"><div class="code-title">run.c -- sample(): 三选一的采样入口</div><pre class="hl-code"><span class="kt">int</span><span class="w"> </span><span class="nf">sample</span><span class="p">(</span><span class="n">Sampler</span><span class="o">*</span><span class="w"> </span><span class="n">sampler</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">logits</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">next</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">temperature</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mf">0.0f</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="hll"><span class="w">        </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sample_argmax</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span><span class="w"> </span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="p">);</span>
+</span><span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">q</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">q</span><span class="o">&lt;</span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="p">;</span><span class="w"> </span><span class="n">q</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">logits</span><span class="p">[</span><span class="n">q</span><span class="p">]</span><span class="w"> </span><span class="o">/=</span><span class="w"> </span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">temperature</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">        </span><span class="n">softmax</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span><span class="w"> </span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="p">);</span>
+<span class="w">        </span><span class="kt">float</span><span class="w"> </span><span class="n">coin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">random_f32</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">rng_state</span><span class="p">);</span>
+<span class="hll"><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">topp</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">topp</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span class="w">            </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sample_mult</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span><span class="w"> </span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="p">,</span><span class="w"> </span><span class="n">coin</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sample_topp</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span><span class="w"> </span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="p">,</span><span class="w"> </span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">topp</span><span class="p">,</span><span class="w"> </span><span class="n">sampler</span><span class="o">-&gt;</span><span class="n">probindex</span><span class="p">,</span><span class="w"> </span><span class="n">coin</span><span class="p">);</span>
+<span class="hll"><span class="w">        </span><span class="p">}</span>
+</span><span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">next</span><span class="p">;</span>
+<span class="hll"><span class="p">}</span>
+</span></pre></div>
+<p><code>temperature == 0</code>（第 4 行）时完全跳过随机性，直接 <code>sample_argmax</code>——<strong>确定性输出</strong>，同一个 prompt 每次生成结果都一样。一旦温度非零，先按温度缩放 logits 再 softmax（第 9 行的 <code>coin</code> 是唯一的随机源），再根据 <code>topp</code> 是否在 <code>(0,1)</code> 区间决定用全概率采样还是截断到 nucleus。</p>
+<h2><code>sample_argmax</code> / <code>sample_mult</code>：贪心与多项式采样</h2>
+<div class="code-panel"><div class="code-title">run.c -- sample_argmax()</div><pre class="hl-code"><span class="kt">int</span><span class="w"> </span><span class="nf">sample_argmax</span><span class="p">(</span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">probabilities</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="hll"><span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max_i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+</span><span class="hll"><span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="n">max_p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">probabilities</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+</span><span class="hll"><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">n</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span class="hll"><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">probabilities</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">max_p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">max_i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w"> </span><span class="n">max_p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">probabilities</span><span class="p">[</span><span class="n">i</span><span class="p">];</span><span class="w"> </span><span class="p">}</span>
+</span><span class="hll"><span class="w">    </span><span class="p">}</span>
+</span><span class="hll"><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">max_i</span><span class="p">;</span>
+</span><span class="p">}</span>
+</pre></div>
+<div class="code-panel"><div class="code-title">run.c -- sample_mult(): 按概率分布直接采样</div><pre class="hl-code"><span class="kt">int</span><span class="w"> </span><span class="nf">sample_mult</span><span class="p">(</span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">probabilities</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="w"> </span><span class="n">coin</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// coin is a random number in [0, 1), usually from random_f32()</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="n">cdf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.0f</span><span class="p">;</span>
+<span class="hll"><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">n</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span class="hll"><span class="w">        </span><span class="n">cdf</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">probabilities</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+</span><span class="hll"><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">coin</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">cdf</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+</span><span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// in case of rounding errors</span>
+<span class="p">}</span>
+</pre></div>
+<p><code>sample_mult</code> 是标准的<strong>逆变换采样（inverse transform sampling）</strong>：把 <code>[0,1)</code> 均匀随机数 <code>coin</code> 对着累积分布函数（CDF）&quot;扎一刀&quot;，扎中哪个区间就返回哪个 index——概率越大的 token，累积区间越宽，被扎中的概率也越大。这是离散分布采样的通用数学技巧，不是 llama2.c 专属发明。</p>
+<h2><code>sample_topp</code>：nucleus（top-p）采样</h2>
+<div class="code-panel"><div class="code-title">run.c -- sample_topp(): 只在累积概率超过 topp 的最小集合里采样</div><pre class="hl-code"><span class="kt">int</span><span class="w"> </span><span class="nf">sample_topp</span><span class="p">(</span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">probabilities</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="w"> </span><span class="n">topp</span><span class="p">,</span><span class="w"> </span><span class="n">ProbIndex</span><span class="o">*</span><span class="w"> </span><span class="n">probindex</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="w"> </span><span class="n">coin</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">n0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// values smaller than (1 - topp) / (n - 1) cannot be part of the result</span>
+<span class="w">    </span><span class="c1">// so for efficiency we crop these out as candidates before sorting</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">float</span><span class="w"> </span><span class="n">cutoff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="mf">1.0f</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">topp</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="p">(</span><span class="n">n</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">n</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">probabilities</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">cutoff</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="hll"><span class="w">            </span><span class="n">probindex</span><span class="p">[</span><span class="n">n0</span><span class="p">].</span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+</span><span class="hll"><span class="w">            </span><span class="n">probindex</span><span class="p">[</span><span class="n">n0</span><span class="p">].</span><span class="n">prob</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">probabilities</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+</span><span class="hll"><span class="w">            </span><span class="n">n0</span><span class="o">++</span><span class="p">;</span>
+</span><span class="hll"><span class="w">        </span><span class="p">}</span>
+</span><span class="hll"><span class="w">    </span><span class="p">}</span>
+</span><span class="hll"><span class="w">    </span><span class="n">qsort</span><span class="p">(</span><span class="n">probindex</span><span class="p">,</span><span class="w"> </span><span class="n">n0</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">ProbIndex</span><span class="p">),</span><span class="w"> </span><span class="n">compare</span><span class="p">);</span>
+</span><span class="hll">
+</span><span class="w">    </span><span class="c1">// truncate the list where cumulative probability exceeds topp</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="n">cumulative_prob</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.0f</span><span class="p">;</span>
+<span class="hll"><span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">last_idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">n0</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span class="hll"><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">n0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span class="hll"><span class="w">        </span><span class="n">cumulative_prob</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">probindex</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">prob</span><span class="p">;</span>
+</span><span class="hll"><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cumulative_prob</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">topp</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">last_idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+</span><span class="hll"><span class="w">    </span><span class="p">}</span>
+</span><span class="hll">
+</span><span class="hll"><span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">coin</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">cumulative_prob</span><span class="p">;</span>
+</span><span class="hll"><span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="n">cdf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.0f</span><span class="p">;</span>
+</span><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">last_idx</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">cdf</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">probindex</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">prob</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">r</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">cdf</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">probindex</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">index</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">probindex</span><span class="p">[</span><span class="n">last_idx</span><span class="p">].</span><span class="n">index</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>三步走：① 用 <code>cutoff</code> 粗筛掉不可能入选的低概率 token（避免对全部 32000 个 token 排序）；② 对剩下候选按概率降序排序，从高到低累加，一旦累积概率超过 <code>topp</code> 就截断在 <code>last_idx</code>；③ 只在截断后的候选集合里、按<strong>它们之间的相对概率</strong>重新做一次逆变换采样（<code>r = coin * cumulative_prob</code>，不是原始 <code>[0,1)</code>，因为截断后概率总和已经不是 1）。这就是&quot;nucleus 采样只从累积概率达到 p 的最小 token 集合里采样&quot;这句话对应的真实实现。</p>
+<div class="aside">
+<b>与 <code>model.py</code> 的 <code>generate()</code> 对比：</b>PyTorch 侧的朴素生成函数用的是 <b>top-k</b>（<code>torch.topk(logits, k)</code>，只保留概率最高的固定 k 个候选），<b>不是</b> top-p。两者都是"截断长尾"的思路，但截断规则不同：top-k 截断数量固定，top-p 截断的是"凑够多少概率质量"，候选数量随分布形状浮动（分布越尖锐，nucleus 越小）。<code>run.c</code> 的真实推理管线用 top-p，训练代码里顺手写的朴素 <code>generate()</code> 用 top-k——这是同一个仓库里两条并存但不同的采样实现，不是笔误。
+</div>
+<h2><code>random_u32</code>/<code>random_f32</code>：xorshift，不依赖任何库的伪随机数</h2>
+<div class="code-panel"><div class="code-title">run.c -- xorshift 伪随机数生成器</div><pre class="hl-code"><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="nf">random_u32</span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="o">*</span><span class="n">state</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A</span>
+<span class="w">    </span><span class="o">*</span><span class="n">state</span><span class="w"> </span><span class="o">^=</span><span class="w"> </span><span class="o">*</span><span class="n">state</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">12</span><span class="p">;</span>
+<span class="w">    </span><span class="o">*</span><span class="n">state</span><span class="w"> </span><span class="o">^=</span><span class="w"> </span><span class="o">*</span><span class="n">state</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">25</span><span class="p">;</span>
+<span class="w">    </span><span class="o">*</span><span class="n">state</span><span class="w"> </span><span class="o">^=</span><span class="w"> </span><span class="o">*</span><span class="n">state</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">27</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">state</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mh">0x2545F4914F6CDD1Dull</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">32</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kt">float</span><span class="w"> </span><span class="nf">random_f32</span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="o">*</span><span class="n">state</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">random_u32</span><span class="p">(</span><span class="n">state</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">16777216.0f</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><code>Sampler</code> 结构体自带一个 <code>unsigned long long rng_state</code>（由 <code>-s</code> 命令行参数或 <code>time(NULL)</code> 初始化），每次采样都会推进这个状态——xorshift 是一种只用位移和异或就能生成看起来随机的数列的经典算法，不依赖 <code>&lt;stdlib.h&gt;</code> 的 <code>rand()</code>，也是&quot;700 行不依赖任何库&quot;这个目标的一部分。</p>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

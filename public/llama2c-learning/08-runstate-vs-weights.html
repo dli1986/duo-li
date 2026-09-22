@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -52,7 +60,7 @@
     <a href="index.html" class="nav-home">← 目录</a>
     <div class="nav-arrows">
       <a href="07-c-tensor-layout.html" class="nav-prev">← 上一节</a>
-      <span class="page-counter">8 / 12</span>
+      <span class="page-counter">8 / 16</span>
       <a href="09-run-c-engineering.html" class="nav-next">下一节 →</a>
     </div>
   </nav>
@@ -87,6 +95,32 @@
 </tr>
 </tbody>
 </table>
+<p>两份 struct 的真实定义，逐字段对照着看最直观：</p>
+<div class="code-panel"><div class="code-title">run.c -- TransformerWeights: 训练学到的、只读的参数</div><pre class="hl-code"><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">token_embedding_table</span><span class="p">;</span><span class="w">    </span><span class="c1">// (vocab_size, dim)</span>
+<span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">rms_att_weight</span><span class="p">;</span><span class="w"> </span><span class="c1">// (layer, dim)</span>
+<span class="hll"><span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">wq</span><span class="p">;</span><span class="w"> </span><span class="c1">// (layer, dim, n_heads * head_size)</span>
+</span><span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">wk</span><span class="p">;</span><span class="w"> </span><span class="c1">// (layer, dim, n_kv_heads * head_size)</span>
+<span class="hll"><span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">wo</span><span class="p">;</span><span class="w"> </span><span class="c1">// (layer, n_heads * head_size, dim)</span>
+</span><span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">w1</span><span class="p">;</span><span class="w"> </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">w2</span><span class="p">;</span><span class="w"> </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">w3</span><span class="p">;</span><span class="w"> </span><span class="c1">// ffn, each (layer, ...)</span>
+<span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">rms_final_weight</span><span class="p">;</span><span class="w"> </span><span class="c1">// (dim,)</span>
+<span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">wcls</span><span class="p">;</span><span class="w"> </span><span class="c1">// classifier weights, optionally shared with token_embedding_table</span>
+<span class="p">}</span><span class="w"> </span><span class="n">TransformerWeights</span><span class="p">;</span>
+</pre></div>
+<div class="code-panel"><div class="code-title">run.c -- RunState: 前向传播中间结果，只 1 份</div><pre class="hl-code"><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">x</span><span class="p">;</span><span class="w"> </span><span class="c1">// activation at current time stamp (dim,)</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">xb</span><span class="p">;</span><span class="w"> </span><span class="c1">// same, but inside a residual branch (dim,)</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">xb2</span><span class="p">;</span><span class="w"> </span><span class="c1">// an additional buffer just for convenience (dim,)</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">hb</span><span class="p">;</span><span class="w"> </span><span class="c1">// buffer for hidden dimension in the ffn (hidden_dim,)</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">hb2</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">q</span><span class="p">;</span><span class="w"> </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">k</span><span class="p">;</span><span class="w"> </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">v</span><span class="p">;</span><span class="w"> </span><span class="c1">// query/key/value (dim,)</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">att</span><span class="p">;</span><span class="w"> </span><span class="c1">// buffer for scores/attention values (n_heads, seq_len)</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="o">*</span><span class="n">logits</span><span class="p">;</span><span class="w"> </span><span class="c1">// output logits</span>
+<span class="hll"><span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">key_cache</span><span class="p">;</span><span class="w">   </span><span class="c1">// (layer, seq_len, dim)</span>
+</span><span class="hll"><span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">value_cache</span><span class="p">;</span><span class="w"> </span><span class="c1">// (layer, seq_len, dim)</span>
+</span><span class="p">}</span><span class="w"> </span><span class="n">RunState</span><span class="p">;</span>
+</pre></div>
+<p><code>TransformerWeights</code> 每个指针都带 <code>(layer, ...)</code> 前缀，因为它们确实是 <code>n_layers</code> 份权重拼接在一个大数组里（见「C 语言里的&quot;张量&quot;」页的 <code>memory_map_weights</code>）；<code>RunState</code> 里绝大多数字段没有 layer 维度——因为它们只是&quot;当前处理到哪一层&quot;的临时中转站，<code>forward()</code> 的 <code>for</code> 循环每跑一层都覆写同一块内存，只有 <code>key_cache</code>/<code>value_cache</code> 这两个字段例外（下面详述）。</p>
 <div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 460" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
   <defs>
     <marker id="ar8" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">

@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -52,7 +60,7 @@
     <a href="index.html" class="nav-home">← 目录</a>
     <div class="nav-arrows">
       <a href="06-rope-math.html" class="nav-prev">← 上一节</a>
-      <span class="page-counter">7 / 12</span>
+      <span class="page-counter">7 / 16</span>
       <a href="08-runstate-vs-weights.html" class="nav-next">下一节 →</a>
     </div>
   </nav>
@@ -151,6 +159,25 @@
 </tr>
 </tbody>
 </table>
+<p>真实的指针行进过程——<code>memory_map_weights</code> 不做任何拷贝，只是把一个 <code>float*</code> 指针按照权重大小依次往前挖：</p>
+<div class="code-panel"><div class="code-title">run.c -- memory_map_weights(): 纯指针算术，零拷贝</div><pre class="hl-code"><span class="kt">void</span><span class="w"> </span><span class="nf">memory_map_weights</span><span class="p">(</span><span class="n">TransformerWeights</span><span class="w"> </span><span class="o">*</span><span class="n">w</span><span class="p">,</span><span class="w"> </span><span class="n">Config</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">shared_weights</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">head_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">dim</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">n_heads</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">n_layers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">n_layers</span><span class="p">;</span>
+<span class="w">    </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">token_embedding_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ptr</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">vocab_size</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">dim</span><span class="p">;</span>
+<span class="hll"><span class="w">    </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">rms_att_weight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span>
+</span><span class="hll"><span class="w">    </span><span class="n">ptr</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">n_layers</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">dim</span><span class="p">;</span>
+</span><span class="w">    </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">wq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span>
+<span class="hll"><span class="w">    </span><span class="n">ptr</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">n_layers</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">dim</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">n_heads</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">head_size</span><span class="p">);</span>
+</span><span class="hll"><span class="w">    </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">wk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span>
+</span><span class="w">    </span><span class="n">ptr</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">n_layers</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">dim</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">n_kv_heads</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">head_size</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// ... wv, wo, rms_ffn_weight, w1, w2, w3 依次同理</span>
+<span class="w">    </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">rms_final_weight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ptr</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">dim</span><span class="p">;</span>
+<span class="w">    </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">wcls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">shared_weights</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">token_embedding_table</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>没有任何 <code>malloc</code>/拷贝——每一行只是把 <code>ptr</code> 指向文件里的下一段地址，再把指针向前挖过刚才那个字段的总大小（<code>p-&gt;vocab_size * p-&gt;dim</code>、<code>n_layers * p-&gt;dim * (...)</code> …）。这个函数自身就是“偏移公式只写一处”的实例——每个字段的起始地址都是上一个字段的终点，顺序必须与 <code>export.py</code> 写入的顺序一致，否则整个模型会静默错位。</p>
 <h2>shape-only vs shape+stride：不是记法不同，是表达力不同</h2>
 <p>只存 shape、靠&quot;标准连续假设&quot;现算 stride，<strong>只能表达完全连续的布局</strong>。以下场景必须显式存 stride（与 shape 分离）才能表达：</p>
 <table>
@@ -191,15 +218,25 @@
 <ul>
 <li>激活值 <code>h</code>：<code>(B,T,C)</code>，在 <code>for layer in self.layers</code> 循环里被反复覆写，没有 layer 轴。</li>
 <li>权重：<code>self.layers</code> 是 <code>nn.ModuleList</code>，每层是<strong>独立 Python 对象</strong>（<code>self.layers[0].attention.wq.weight</code> 各自形状 <code>(dim,dim)</code>），PyTorch 从没把它们拼成一个带 layer 轴的大 tensor。</li>
-<li><code>run.c</code> 注释里的 <code>layer</code> 轴，来自 <code>export.py</code> 把 <code>n_layers</code> 个独立小矩阵<strong>首尾拼接</strong>进一个文件的动作（<code>for layer in model.layers: serialize_fp32(...)</code>）——是 C 端为了用一个 mmap 指针 + 偏移量寻址，人为制造出来的轴。</li>
+<li><code>run.c</code> 注释里的 <code>layer</code> 轴，来自 <code>export.py</code> 把 <code>n_layers</code> 个独立小矩阵<strong>首尾拼接</strong>进一个文件的动作——是 C 端为了用一个 mmap 指针 + 偏移量寻址，人为制造出来的轴：</li>
+</ul>
+<div class="code-panel"><div class="code-title">export.py -- legacy_export(): layer 轴是这样被“拼”出来的</div><pre class="hl-code"><span class="c1"># attention weights</span>
+<span class="hll"><span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">:</span>
+</span>    <span class="n">serialize_fp32</span><span class="p">(</span><span class="n">out_file</span><span class="p">,</span> <span class="n">layer</span><span class="o">.</span><span class="n">attention_norm</span><span class="o">.</span><span class="n">weight</span><span class="p">)</span>
+<span class="hll"><span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">:</span>
+</span>    <span class="n">serialize_fp32</span><span class="p">(</span><span class="n">out_file</span><span class="p">,</span> <span class="n">layer</span><span class="o">.</span><span class="n">attention</span><span class="o">.</span><span class="n">wq</span><span class="o">.</span><span class="n">weight</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">:</span>
+    <span class="n">serialize_fp32</span><span class="p">(</span><span class="n">out_file</span><span class="p">,</span> <span class="n">layer</span><span class="o">.</span><span class="n">attention</span><span class="o">.</span><span class="n">wk</span><span class="o">.</span><span class="n">weight</span><span class="p">)</span>
+</pre></div>
+<p><code>model.layers</code> 是 <code>nn.ModuleList</code>，循环里每次 <code>layer.attention.wq.weight</code> 都是一个独立形状 <code>(dim,dim)</code> 的 Python 张量对象——<strong>没有任何一个 PyTorch 张量真正拥有 <code>(n_layers,dim,dim)</code> 这个形状</strong>。<code>for layer in model.layers: serialize_fp32(...)</code>（第 2/4 行）逐层写入文件的这个动作，才是 <code>run.c</code> 里 <code>(layer, dim, dim)</code> 这个形状注释的真正来源——导出时才产生的序列化人为产物，不是 PyTorch tensor 本身的形状。</p>
+<ul>
 <li>唯一没有 <code>layer</code> 前缀的 <code>token_embedding_table</code>/<code>rms_final_weight</code>，对应 <code>model.py</code> 里<strong>不属于</strong> <code>self.layers</code>、只在 <code>Transformer</code> 类里出现一次的字段（<code>self.tok_embeddings</code>、<code>self.norm</code>）。</li>
 </ul>
 <h2>Tensor 不是 list——底层永远是&quot;一整块连续内存&quot;</h2>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="o">&gt;&gt;&gt;</span> <span class="nb">input</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="mi">5</span><span class="p">],[</span><span class="mi">4</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">9</span><span class="p">]])</span>
+<pre class="hl-code"><span class="o">&gt;&gt;&gt;</span> <span class="nb">input</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="mi">5</span><span class="p">],[</span><span class="mi">4</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">9</span><span class="p">]])</span>
 <span class="o">&gt;&gt;&gt;</span> <span class="nb">input</span><span class="o">.</span><span class="n">shape</span>
 <span class="n">torch</span><span class="o">.</span><span class="n">Size</span><span class="p">([</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">])</span>
-</pre></div>
-</code></pre>
+</pre>
 <table>
 <thead>
 <tr>

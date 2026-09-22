@@ -39,9 +39,17 @@
     
     <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
     
-    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
     
-    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
     
   </ol>
 </nav>
@@ -52,7 +60,7 @@
     <a href="index.html" class="nav-home">← 目录</a>
     <div class="nav-arrows">
       <a href="03-data-pipeline.html" class="nav-prev">← 上一节</a>
-      <span class="page-counter">4 / 12</span>
+      <span class="page-counter">4 / 16</span>
       <a href="05-arch-diff.html" class="nav-next">下一节 →</a>
     </div>
   </nav>
@@ -61,34 +69,35 @@
   <h1><span class="step-badge">4</span>PyTorch 模型定义与 nn.Module 注册机制</h1>
   <div class="page-prose">
     <h2><code>ModelArgs</code>：<code>@dataclass</code> + &quot;Llama 7B 默认值&quot;的真实含义</h2>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="nd">@dataclass</span>
+<div class="code-panel"><div class="code-title">model.py -- ModelArgs</div><pre class="hl-code"><span class="nd">@dataclass</span>
 <span class="k">class</span><span class="w"> </span><span class="nc">ModelArgs</span><span class="p">:</span>
-    <span class="c1"># default hyperparameters for the Llama 7B model</span>
-    <span class="n">dim</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">4096</span>
-    <span class="n">n_layers</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span>
-    <span class="n">n_heads</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span>
-    <span class="n">vocab_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32000</span>
+<span class="hll">    <span class="c1"># default hyperparameters for the Llama 7B model</span>
+</span><span class="hll">    <span class="n">dim</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">4096</span>
+</span><span class="hll">    <span class="n">n_layers</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span>
+</span><span class="hll">    <span class="n">n_heads</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span>
+</span><span class="hll">    <span class="n">n_kv_heads</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span class="hll">    <span class="n">vocab_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32000</span>
+</span>    <span class="n">hidden_dim</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">multiple_of</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">256</span>  <span class="c1"># MLP hidden layer size will be multiple of</span>
+    <span class="n">norm_eps</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1e-5</span>
     <span class="n">max_seq_len</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2048</span>
-    <span class="o">...</span>
+    <span class="n">dropout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
 </pre></div>
-</code></pre>
 <p><code>dim=4096, n_layers=32, n_heads=32, vocab_size=32000, max_seq_len=2048</code> <strong>就是 Meta 官方 LLaMA 7B 的真实架构参数</strong>。README 明确写了&quot;架构与 Meta 的 Llama 2 完全一致，可以直接加载、推理 Meta 发布的真实模型&quot;（对应 <code>export.py</code> 的 <code>--meta-llama</code> 参数）。所以这些默认值的意义是：<strong><code>ModelArgs()</code> 不传参数时，直接就是一份能装下真实 7B checkpoint 的正确配置</strong>，不是随手写的示例。</p>
 <p>在 <code>train.py</code> 训练 TinyStories 这条路径上，这些默认值<strong>从未真正生效</strong>——<code>model_args = dict(dim=dim, n_layers=n_layers, ...)</code> 把 <code>train.py</code> 自己的全局变量（288/6/6，给 stories15M 用）逐字段显式传入，<code>ModelArgs(**model_args)</code> 时 7B 默认值全部被覆盖。只有在某处构造 <code>ModelArgs()</code> 却没传全部字段时，7B 默认值才会真正起作用。</p>
 <p><code>@dataclass</code> 让你只写&quot;字段名: 类型 = 默认值&quot;就自动生成构造函数，<code>ModelArgs(**model_args)</code> 能正确工作，靠的正是这个自动生成的 <code>__init__</code> 按字段名匹配关键字参数——跟 <code>@staticmethod</code>（改变的是方法调用约定，不注入 <code>self</code>）解决的是完全不同的问题。</p>
 <h2><code>nn.Embedding</code>：可学习参数到底存在哪</h2>
 <p><code>nn.Embedding</code> 就是一张查找表，数据存在 <code>.weight</code> 这个普通属性里：</p>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="o">&gt;&gt;&gt;</span> <span class="n">embedding</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>   <span class="c1"># 10行(vocab_size)×3列(embedding_dim)</span>
+<pre class="hl-code"><span class="o">&gt;&gt;&gt;</span> <span class="n">embedding</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>   <span class="c1"># 10行(vocab_size)×3列(embedding_dim)</span>
 <span class="o">&gt;&gt;&gt;</span> <span class="n">embedding</span><span class="o">.</span><span class="n">weight</span>
 <span class="n">Parameter</span> <span class="n">containing</span><span class="p">:</span>
 <span class="n">tensor</span><span class="p">([[</span> <span class="mf">1.0000</span><span class="p">,</span>  <span class="mf">1.0000</span><span class="p">,</span>  <span class="mf">1.0000</span><span class="p">],</span>
         <span class="p">[</span><span class="o">-</span><span class="mf">0.7895</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.7089</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.0364</span><span class="p">],</span> <span class="o">...</span><span class="p">],</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-</pre></div>
-</code></pre>
+</pre>
 <p><code>embedding(input)</code> 做的事情就是&quot;查表&quot;：<code>input</code> 里每个整数是&quot;行号&quot;，输出就是把对应那一行的向量抄出来。这跟 <code>run.c</code> 里的写法是<strong>同一件事，只是换了层皮</strong>：</p>
-<pre><code class="language-c"><div class="hl-code"><pre><span></span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">content_row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">token_embedding_table</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">token</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">dim</span><span class="p">;</span><span class="w">   </span><span class="c1">// C：自己手写偏移公式做查表</span>
+<div class="code-panel"><div class="code-title">run.c -- forward(): token embedding 查表</div><pre class="hl-code"><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">content_row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">token_embedding_table</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">token</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">dim</span><span class="p">;</span>
 <span class="n">memcpy</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">content_row</span><span class="p">,</span><span class="w"> </span><span class="n">dim</span><span class="o">*</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">x</span><span class="p">));</span>
 </pre></div>
-</code></pre>
 <h2><code>nn.Module</code> 的注册机制：三个独立的 Python magic method 接力完成</h2>
 <div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 460" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
   <defs>
@@ -148,17 +157,31 @@
 <li><strong><code>__getattr__</code>（读的兜底钩子）</strong>：只在&quot;常规方式在 <code>__dict__</code>/类属性里都找不到&quot;时才触发，从 <code>self._parameters</code>/<code>self._modules</code> 里找回来——两条路径（手动模拟查找 vs 触发 <code>__getattr__</code> 自动查找）拿到的是<strong>同一个对象</strong>，因为存的是引用，不是复制。</li>
 <li><strong><code>__call__</code>（调用钩子）</strong>：<code>self.tok_embeddings(tokens)</code> 里的 <code>(tokens)</code> 触发的是 <code>nn.Module.__call__</code>，内部再转发到 <code>.forward(tokens)</code>。&quot;对象能不能被 <code>()</code> 调用&quot;是 Python 语言本身的机制（任何类定义 <code>__call__</code> 都行），&quot;调用后去执行一个叫 <code>forward</code> 的方法&quot;是 <code>nn.Module</code> 自己的框架约定，两者是两个独立层次。</li>
 </ul>
-<p>整个模型因此形成一棵树：<code>Transformer → tok_embeddings(Embedding) → weight(真正的张量)</code>。<code>model.parameters()</code>/<code>model.state_dict()</code> 只是<strong>递归遍历这棵树</strong>，自动收集所有登记过的参数，不需要手动一个个列出来。</p>
+<p>整个模型因此形成一棵树：<code>Transformer → tok_embeddings(Embedding) → weight(真正的张量)</code>。<code>model.parameters()</code>/<code>model.state_dict()</code> 只是<strong>递归遍历这棵树</strong>，自动收集所有登记过的参数，不需要手动一个个列出来。真实构造代码：</p>
+<div class="code-panel"><div class="code-title">model.py -- Transformer.__init__(): weight tying 真实代码</div><pre class="hl-code"><span class="k">class</span><span class="w"> </span><span class="nc">Transformer</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">:</span> <span class="n">ModelArgs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tok_embeddings</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">vocab_size</span><span class="p">,</span> <span class="n">params</span><span class="o">.</span><span class="n">dim</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">layers</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">ModuleList</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">layer_id</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">n_layers</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">layers</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">TransformerBlock</span><span class="p">(</span><span class="n">layer_id</span><span class="p">,</span> <span class="n">params</span><span class="p">))</span>
+<span class="hll">        <span class="bp">self</span><span class="o">.</span><span class="n">output</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">dim</span><span class="p">,</span> <span class="n">params</span><span class="o">.</span><span class="n">vocab_size</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</span>        <span class="c1"># share the unembedding parameters with the embedding parameters</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tok_embeddings</span><span class="o">.</span><span class="n">weight</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">weight</span>  <span class="c1"># https://paperswithcode.com/method/weight-tying</span>
+</pre></div>
+<p><code>self.tok_embeddings.weight = self.output.weight</code>（第 8 行）——把输出层的权重矩阵直接<strong>赋值成同一个 <code>nn.Parameter</code> 对象</strong>（不是拷贝一份初始值），从此两处共享同一块显存/内存：反向传播时两边的梯度会自动累加到同一份 <code>.grad</code> 上。<code>self.output = nn.Linear(...)</code> 先创建时该行本会先生成一份独立权重，赋值发生后原来那份初始 <code>output.weight</code> 对象被丢弃、GC 回收——最终 <code>named_parameters()</code> 里只会看到一份 <code>tok_embeddings.weight</code>，<code>output.weight</code> 不再单独出现在参数列表里（因为它和 <code>tok_embeddings.weight</code> 是同一个对象）。</p>
+<div class="aside">
+<b>为什么可以共享：</b>输入 embedding 把“token id → 向量”，输出层把“向量 → 每个 token 的 logit 分数”——两者本质都是“向量空间↔词表”的同一张映射表的两个方向，共享参数既减少参数量，也是被广泛验证有效的正则化手段。
+</div>
 <div class="aside warn">
 <b>容易搞混的点：</b><code>h = self.tok_embeddings(tokens)</code> 里的 <code>h</code> 是普通局部变量赋值，从未经过 <code>self.xxx=</code>，<code>__setattr__</code> 的检查机制根本没被触发过——不是"检查了发现不是 Parameter 所以被排除"。"hidden"这个名字只是深度学习传统术语（隐藏层：不直接暴露给外部的中间表示），跟"是否被 <code>_parameters</code> 记录、是否被 optimizer 更新"没有因果关系，这是两个完全独立的维度。
 </div>
 <h2><code>register_buffer</code>：第三种登记方式</h2>
 <p><code>model.py</code> 里的 RoPE 频率表：</p>
-<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="n">freqs_cos</span><span class="p">,</span> <span class="n">freqs_sin</span> <span class="o">=</span> <span class="n">precompute_freqs_cis</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">dim</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">n_heads</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">max_seq_len</span><span class="p">)</span>
-<span class="bp">self</span><span class="o">.</span><span class="n">register_buffer</span><span class="p">(</span><span class="s2">&quot;freqs_cos&quot;</span><span class="p">,</span> <span class="n">freqs_cos</span><span class="p">,</span> <span class="n">persistent</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-<span class="bp">self</span><span class="o">.</span><span class="n">register_buffer</span><span class="p">(</span><span class="s2">&quot;freqs_sin&quot;</span><span class="p">,</span> <span class="n">freqs_sin</span><span class="p">,</span> <span class="n">persistent</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-</pre></div>
-</code></pre>
+<div class="code-panel"><div class="code-title">model.py -- Transformer.__init__(): register_buffer</div><pre class="hl-code"><span class="n">freqs_cos</span><span class="p">,</span> <span class="n">freqs_sin</span> <span class="o">=</span> <span class="n">precompute_freqs_cis</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">dim</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">n_heads</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">max_seq_len</span><span class="p">)</span>
+<span class="hll"><span class="bp">self</span><span class="o">.</span><span class="n">register_buffer</span><span class="p">(</span><span class="s2">&quot;freqs_cos&quot;</span><span class="p">,</span> <span class="n">freqs_cos</span><span class="p">,</span> <span class="n">persistent</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</span><span class="hll"><span class="bp">self</span><span class="o">.</span><span class="n">register_buffer</span><span class="p">(</span><span class="s2">&quot;freqs_sin&quot;</span><span class="p">,</span> <span class="n">freqs_sin</span><span class="p">,</span> <span class="n">persistent</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</span></pre></div>
 <p>存的是第三个独立字典 <code>_buffers</code>——同样不会出现在 <code>__dict__</code> 里。跟 <code>nn.Parameter</code> 的关键区别：</p>
 <table>
 <thead>

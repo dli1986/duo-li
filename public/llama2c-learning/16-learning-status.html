@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>学习进度与下一步 — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
+    
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class="active"><span class="nav-num">16</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="15-comparison-table.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">16 / 16</span>
+      <span class="nav-next disabled">下一节 →</span>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">16</span>学习进度与下一步</h1>
+  <div class="page-prose">
+    <p>这一页刻意保留&quot;未完成&quot;状态——诚实标注哪些内容已经在真实笔记/真实代码里验证过，哪些还没有深入，不用推测或幻觉填补空白。</p>
+<h2>已经吃透的部分（本站前 14 页覆盖的范围）</h2>
+<ul>
+<li>全局数据/权重/词表三条管线，以及它们如何在 <code>run.c</code> 汇合（<code>main()</code> 的四行入口）。</li>
+<li>Tokenizer：Python 端 SentencePiece 包装 vs C 端从零手写的 BPE 合并循环（含真实 <code>encode()</code> 全部代码），二进制格式的 byte-for-byte 对齐关系。</li>
+<li>训练数据管道 <code>tinystories.py</code>：分片、<code>ProcessPoolExecutor</code> 并行、<code>PretokDataset</code> 的定长切块与打乱策略。</li>
+<li><code>model.py</code> 的 <code>nn.Module</code> 内部机制：<code>ModelArgs</code> dataclass、<code>__setattr__</code>/<code>__getattr__</code>/<code>__call__</code> 三个独立钩子、<code>register_buffer</code>、weight tying 的真实赋值语义。</li>
+<li>四个核心架构差异：RMSNorm、RoPE、SwiGLU、GQA/大矩阵 reshape，逐项与 nanoGPT 教学版对照，均附真实 Python + C 双语言代码。</li>
+<li>RoPE 的完整数学推导（旋转矩阵复合性质的代数证明）、手算数值例子、真实 <code>precompute_freqs_cis</code>/<code>apply_rotary_emb</code>/C 端现算三份代码对照。</li>
+<li>C 语言里&quot;张量&quot;的本质：flat 数组 + stride 公式，真实 <code>memory_map_weights()</code> 指针算术，<code>legacy_export()</code> 真实代码证明 layer 轴是序列化人为产物。</li>
+<li><code>RunState</code> vs <code>TransformerWeights</code>：两份真实 struct 定义逐字段对照，KV cache 作为例外。</li>
+<li><code>run.c</code> 的工程实现：真实 <code>read_checkpoint</code>/<code>mmap</code> 代码，<code>mmap</code> 的真实优势场景，真实 <code>generate()</code> 循环证明无 batched prefill。</li>
+<li>训练工程细节：<code>pin_memory</code>/<code>non_blocking</code> 背后真实的 DMA 硬件约束、真实 <code>configurator.py</code> 全部代码。</li>
+<li><strong>（新增）<code>run.c</code> 采样策略</strong>：真实 <code>sample()</code>/<code>sample_argmax()</code>/<code>sample_mult()</code>/<code>sample_topp()</code>/xorshift 随机数全部代码，以及与 <code>model.py</code> <code>generate()</code> 用 top-k（而非 top-p）这一真实差异。</li>
+<li><strong>（新增）学习率调度与损失评估</strong>：真实 <code>get_lr()</code> 余弦退火公式逐行拆解，真实 <code>estimate_loss()</code> 的 <code>@torch.no_grad()</code>/<code>model.eval()</code>/多批平均设计。</li>
+<li><strong>（新增）优化器配置与 MFU</strong>：真实 <code>configure_optimizers()</code> 按参数维度分组 decay 的判定代码、fused AdamW 的运行时反射检测，真实 <code>estimate_mfu()</code> 及其 PaLM 论文 FLOPs 公式来源。</li>
+<li><strong>（新增）PyTorch autograd 机制</strong>：计算图/<code>grad_fn</code>/链式法则的标准机制（明确标注这是 PyTorch 框架本身的能力，非 <code>llama2.c</code> 自己的代码），混合精度 <code>GradScaler</code> 的缩放/反缩放原理，均给出可自行运行验证的最小例子。</li>
+</ul>
+<h2>尚未深入的部分（诚实清单，不在本站展开）</h2>
+<div class="aside todo">
+<ul>
+<li><b>分布式训练（DDP）内部机制：</b><code>train.py</code> 里 <code>DistributedDataParallel</code>、<code>init_process_group</code>、<code>model.require_backward_grad_sync</code> 这套多卡梯度同步的具体实现原理，目前只知道调用方式，没有深入 PyTorch DDP 内部的 all-reduce 机制。</li>
+<li><b><code>torch.compile</code> 内部机制：</b><code>train.py</code> 里 <code>model = torch.compile(model)</code> 一行背后 TorchDynamo/TorchInductor 做了什么图捕获/算子融合优化，尚未深入。</li>
+<li><b>量化版本 <code>runq.c</code>：</b>仓库里与 <code>run.c</code> 并列的 int8 量化推理实现（<code>export.py</code> 里的 <code>quantize_q80</code> 已经顺带读到，但 <code>runq.c</code> 本身的量化矩阵乘法、反量化时机等尚未通读。</li>
+<li><b>真实大模型 checkpoint 验证：</b>README 提到的"可以直接加载 Meta 官方 7B/13B/70B checkpoint"这条能力，尚未亲自下载真实权重跑一次验证（目前的理解完全基于 <code>ModelArgs</code> 默认值与 <code>export.py --meta-llama</code> 参数的代码证据，逻辑上成立，但没有亲手跑通）。</li>
+<li><b>C++ 重写 run.c 的具体设计：</b>只有一条初步想法（用非拥有型 span/view 类封装偏移公式，避免像 <code>run.c</code> 那样在多处手写 <code>l*dim*dim</code>），还没有实际动手。</li>
+<li><b>SSD 场景下 mmap 性能验证：</b>「run.c 工程实现」页里 HDD 场景的寻道劣势是从代码访问模式推理出的结论，SSD 上 mmap vs read+malloc 的实测差异是否如预期更小，还没有亲自实测过。</li>
+<li><b><code>chat()</code> 对话模式与 <code>test_all.py</code> 验证体系：</b><code>run.c</code> 里 <code>chat()</code> 函数（Llama 2 Chat 模板拼接）以及仓库自带的测试套件，尚未逐行核对。</li>
+</ul>
+</div>
+<h2>为什么保留这一页</h2>
+<p>这份笔记的价值恰恰在于&quot;如实反映学习进度&quot;——一份声称&quot;全面讲解 llama2.c&quot;却在关键工程细节上语焉不详或过度推测的笔记，比一份坦诚说&quot;这几块还没学&quot;的笔记更容易误导人。休假回来后，这份清单就是下一步学习的直接起点。</p>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>学习率调度与损失评估：get_lr / estimate_loss — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
+    
+    <li><a href="12-lr-schedule-loss.html" class="active"><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class=""><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="11-sampling-strategies.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">12 / 16</span>
+      <a href="13-optimizer-mfu.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">12</span>学习率调度与损失评估：get_lr / estimate_loss</h1>
+  <div class="page-prose">
+    <h2><code>get_lr(it)</code>：warmup + 余弦衰减</h2>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 320" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <style>
+    .axis{stroke:#30363d;stroke-width:1.2;}
+    .curve{stroke:#58a6ff;stroke-width:2.2;fill:none;}
+    .zone{fill:#1e1530;opacity:.35;}
+    .lbl{fill:#e6edf3;font-size:10px;}
+    .sub{fill:#8b949e;font-size:9px;font-family:'Segoe UI',sans-serif;}
+    .tag{fill:#bc8cff;font-size:9.5px;font-family:'Segoe UI',sans-serif;font-weight:bold;}
+  </style>
+
+  <text class="lbl" x="20" y="20" font-size="11" font-weight="bold" fill="#58a6ff">get_lr(it)：warmup + 余弦衰减</text>
+
+  <line class="axis" x1="40" y1="40" x2="40" y2="260"/>
+  <line class="axis" x1="40" y1="260" x2="360" y2="260"/>
+  <text class="sub" x="8" y="84">learning_rate</text>
+  <text class="sub" x="20" y="224">min_lr</text>
+  <text class="sub" x="330" y="278">iter</text>
+
+  <rect class="zone" x="40" y="40" width="80" height="220"/>
+  <text class="tag" x="46" y="52">① 线性 warmup</text>
+
+  <rect class="zone" x="120" y="40" width="180" height="220" opacity=".2"/>
+  <text class="tag" x="150" y="52">② 余弦衰减</text>
+
+  <text class="tag" x="312" y="52">③ min_lr</text>
+
+  <line stroke-dasharray="2,2" stroke="#30363d" x1="40" y1="80" x2="360" y2="80"/>
+  <line stroke-dasharray="2,2" stroke="#30363d" x1="40" y1="220" x2="360" y2="220"/>
+
+  <polyline class="curve" points="
+    40,260 120,80
+    138,83.4 156,93.4 174,108.8 192,128.4 210,150 228,171.6 246,191.2 264,206.6 282,216.6 300,220
+    360,220
+  "/>
+
+  <line stroke-dasharray="3,3" stroke="#8b949e" x1="120" y1="40" x2="120" y2="260"/>
+  <text class="sub" x="94" y="272">warmup_iters</text>
+  <line stroke-dasharray="3,3" stroke="#8b949e" x1="300" y1="40" x2="300" y2="260"/>
+  <text class="sub" x="270" y="272">lr_decay_iters</text>
+
+  <rect x="20" y="286" width="340" height="0" fill="none"/>
+  <text class="sub" x="20" y="300">coeff = 0.5·(1+cos(π·decay_ratio))，decay_ratio ∈ [0,1] 之间连续插值</text>
+</svg>
+</div><div class="diagram-caption">前 warmup_iters 步线性爬升，之后余弦衰减到 min_lr，超出 lr_decay_iters 后保持 min_lr</div></div>
+<div class="code-panel"><div class="code-title">train.py -- get_lr(): 学习率调度器</div><pre class="hl-code"><span class="k">def</span><span class="w"> </span><span class="nf">get_lr</span><span class="p">(</span><span class="n">it</span><span class="p">):</span>
+    <span class="c1"># 1) linear warmup for warmup_iters steps</span>
+<span class="hll">    <span class="k">if</span> <span class="n">it</span> <span class="o">&lt;</span> <span class="n">warmup_iters</span><span class="p">:</span>
+</span><span class="hll">        <span class="k">return</span> <span class="n">learning_rate</span> <span class="o">*</span> <span class="n">it</span> <span class="o">/</span> <span class="n">warmup_iters</span>
+</span>    <span class="c1"># 2) if it &gt; lr_decay_iters, return min learning rate</span>
+    <span class="k">if</span> <span class="n">it</span> <span class="o">&gt;</span> <span class="n">lr_decay_iters</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">min_lr</span>
+    <span class="c1"># 3) in between, use cosine decay down to min learning rate</span>
+    <span class="n">decay_ratio</span> <span class="o">=</span> <span class="p">(</span><span class="n">it</span> <span class="o">-</span> <span class="n">warmup_iters</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="n">lr_decay_iters</span> <span class="o">-</span> <span class="n">warmup_iters</span><span class="p">)</span>
+<span class="hll">    <span class="n">coeff</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="mf">1.0</span> <span class="o">+</span> <span class="n">math</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">decay_ratio</span><span class="p">))</span>  <span class="c1"># coeff ranges 0..1</span>
+</span>    <span class="k">return</span> <span class="n">min_lr</span> <span class="o">+</span> <span class="n">coeff</span> <span class="o">*</span> <span class="p">(</span><span class="n">learning_rate</span> <span class="o">-</span> <span class="n">min_lr</span><span class="p">)</span>
+</pre></div>
+<p>三段函数，逐段对应：</p>
+<ol>
+<li><strong><code>it &lt; warmup_iters</code></strong>（第 3-4 行）：学习率从 0 线性爬升到 <code>learning_rate</code>。原因是训练刚开始时模型权重是随机初始化的，梯度方向很不稳定，直接用满额学习率容易一开始就把参数冲到很差的区域；线性爬升给优化器一个&quot;热身&quot;过程。</li>
+<li><strong><code>it &gt; lr_decay_iters</code></strong>：学习率钉死在 <code>min_lr</code>（<code>train.py</code> 里设成 <code>learning_rate / 10</code>，注释标注&quot;per Chinchilla&quot;，即参照 Chinchilla 论文的经验设置）。</li>
+<li><strong>中间段</strong>（第 10 行）：<code>coeff</code> 是标准的余弦退火公式，<code>decay_ratio</code> 从 0 到 1 时，<code>cos(π·decay_ratio)</code> 从 1 降到 -1，<code>coeff</code> 从 1 平滑降到 0——所以学习率从 <code>learning_rate</code> 平滑降到 <code>min_lr</code>，且降速呈&quot;两头慢、中间快&quot;的 S 形（余弦曲线的导数在两端接近 0）。</li>
+</ol>
+<p>这个函数每一步训练循环都会被调用一次（<code>lr = get_lr(iter_num) if decay_lr else learning_rate</code>），返回值直接赋给 <code>optimizer.param_groups</code> 里每一组的 <code>lr</code> 字段——AdamW 优化器本身不知道&quot;调度&quot;这回事，调度完全是外部每步手动改 <code>lr</code> 实现的。</p>
+<h2><code>estimate_loss()</code>：更准的 loss 估计，代价是多算几十个 batch</h2>
+<p>单个 batch 的 loss 波动很大（batch 越小波动越大），直接打印当前 batch 的 loss 不能代表模型真实水平。<code>train.py</code> 用一个独立函数专门做&quot;更准的估计&quot;：</p>
+<div class="code-panel"><div class="code-title">train.py -- estimate_loss(): 多批平均，train/val 都测</div><pre class="hl-code"><span class="nd">@torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">()</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">estimate_loss</span><span class="p">():</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="n">model</span><span class="o">.</span><span class="n">eval</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">split</span> <span class="ow">in</span> <span class="p">[</span><span class="s2">&quot;train&quot;</span><span class="p">,</span> <span class="s2">&quot;val&quot;</span><span class="p">]:</span>
+<span class="hll">        <span class="n">batch_iter</span> <span class="o">=</span> <span class="n">iter_batches</span><span class="p">(</span><span class="n">split</span><span class="o">=</span><span class="n">split</span><span class="p">)</span>
+</span>        <span class="n">losses</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">eval_iters</span><span class="p">)</span>  <span class="c1"># keep on CPU</span>
+<span class="hll">        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">eval_iters</span><span class="p">):</span>
+</span><span class="hll">            <span class="n">X</span><span class="p">,</span> <span class="n">Y</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span><span class="n">batch_iter</span><span class="p">)</span>
+</span>            <span class="k">with</span> <span class="n">ctx</span><span class="p">:</span>
+                <span class="n">logits</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">Y</span><span class="p">)</span>
+                <span class="n">loss</span> <span class="o">=</span> <span class="n">raw_model</span><span class="o">.</span><span class="n">last_loss</span>
+            <span class="n">losses</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">=</span> <span class="n">loss</span><span class="o">.</span><span class="n">item</span><span class="p">()</span>
+        <span class="n">out</span><span class="p">[</span><span class="n">split</span><span class="p">]</span> <span class="o">=</span> <span class="n">losses</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+    <span class="n">model</span><span class="o">.</span><span class="n">train</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">out</span>
+</pre></div>
+<p>三个关键点：</p>
+<ul>
+<li><strong><code>@torch.no_grad()</code></strong>：这个函数只是&quot;测量&quot;，不需要反向传播，禁用梯度追踪能省下大量显存和计算（不用为每个中间张量保留计算图）。</li>
+<li><strong><code>model.eval()</code> / <code>model.train()</code></strong>（第 4 行、第 12 行反注释掉的位置）：切换到评估模式再切回训练模式——<code>dropout</code> 在 eval 模式下会被关闭（不再随机丢弃神经元），这样测出来的 loss 才是模型&quot;全力以赴&quot;时的真实表现，不是带随机噪声的训练态表现。</li>
+<li><strong><code>losses[k] = loss.item()</code></strong>（第 9 行的下一行）：连续测 <code>eval_iters</code>（默认 100）个 batch 取平均，用&quot;多测几次&quot;的统计平均换取比单个 batch 更稳定的数值——这是纯粹的工程权衡：<code>eval_iters</code> 越大，估计越准，但花的时间也越多（每次评估都要暂停训练跑 100 个 batch）。</li>
+</ul>
+<div class="aside">
+<b>为什么 train 和 val 都要测：</b>只看 train loss 没法判断模型是不是在"死记硬背"训练数据（过拟合）；`losses["val"] < best_val_loss` 这个条件（训练循环里）决定要不要保存 checkpoint——用的是 val loss 不是 train loss，这是避免保存一个过拟合模型的标准做法。
+</div>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

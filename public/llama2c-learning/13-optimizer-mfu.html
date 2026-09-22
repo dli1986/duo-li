@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>优化器配置与 MFU 估算 — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-sampling-strategies.html" class=""><span class="nav-num">11</span>run.c 采样策略：从 greedy 到 nucleus sampling</a></li>
+    
+    <li><a href="12-lr-schedule-loss.html" class=""><span class="nav-num">12</span>学习率调度与损失评估：get_lr / estimate_loss</a></li>
+    
+    <li><a href="13-optimizer-mfu.html" class="active"><span class="nav-num">13</span>优化器配置与 MFU 估算</a></li>
+    
+    <li><a href="14-autograd-mechanism.html" class=""><span class="nav-num">14</span>PyTorch autograd 机制：loss.backward() 背后发生了什么</a></li>
+    
+    <li><a href="15-comparison-table.html" class=""><span class="nav-num">15</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="16-learning-status.html" class=""><span class="nav-num">16</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="12-lr-schedule-loss.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">13 / 16</span>
+      <a href="14-autograd-mechanism.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">13</span>优化器配置与 MFU 估算</h1>
+  <div class="page-prose">
+    <h2><code>configure_optimizers</code>：按参数维度分组做 weight decay</h2>
+<div class="code-panel"><div class="code-title">model.py -- Transformer.configure_optimizers()</div><pre class="hl-code"><span class="k">def</span><span class="w"> </span><span class="nf">configure_optimizers</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">weight_decay</span><span class="p">,</span> <span class="n">learning_rate</span><span class="p">,</span> <span class="n">betas</span><span class="p">,</span> <span class="n">device_type</span><span class="p">):</span>
+    <span class="n">param_dict</span> <span class="o">=</span> <span class="p">{</span><span class="n">pn</span><span class="p">:</span> <span class="n">p</span> <span class="k">for</span> <span class="n">pn</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">named_parameters</span><span class="p">()}</span>
+    <span class="n">param_dict</span> <span class="o">=</span> <span class="p">{</span><span class="n">pn</span><span class="p">:</span> <span class="n">p</span> <span class="k">for</span> <span class="n">pn</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">param_dict</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">requires_grad</span><span class="p">}</span>
+    <span class="c1"># create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.</span>
+    <span class="c1"># i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don&#39;t.</span>
+<span class="hll">    <span class="n">decay_params</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span> <span class="k">for</span> <span class="n">n</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">param_dict</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">dim</span><span class="p">()</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">]</span>
+</span><span class="hll">    <span class="n">nodecay_params</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span> <span class="k">for</span> <span class="n">n</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">param_dict</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">dim</span><span class="p">()</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">]</span>
+</span>    <span class="n">optim_groups</span> <span class="o">=</span> <span class="p">[</span>
+<span class="hll">        <span class="p">{</span><span class="s1">&#39;params&#39;</span><span class="p">:</span> <span class="n">decay_params</span><span class="p">,</span> <span class="s1">&#39;weight_decay&#39;</span><span class="p">:</span> <span class="n">weight_decay</span><span class="p">},</span>
+</span><span class="hll">        <span class="p">{</span><span class="s1">&#39;params&#39;</span><span class="p">:</span> <span class="n">nodecay_params</span><span class="p">,</span> <span class="s1">&#39;weight_decay&#39;</span><span class="p">:</span> <span class="mf">0.0</span><span class="p">}</span>
+</span><span class="hll">    <span class="p">]</span>
+</span><span class="hll">    <span class="n">fused_available</span> <span class="o">=</span> <span class="s1">&#39;fused&#39;</span> <span class="ow">in</span> <span class="n">inspect</span><span class="o">.</span><span class="n">signature</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">optim</span><span class="o">.</span><span class="n">AdamW</span><span class="p">)</span><span class="o">.</span><span class="n">parameters</span>
+</span>    <span class="n">use_fused</span> <span class="o">=</span> <span class="n">fused_available</span> <span class="ow">and</span> <span class="n">device_type</span> <span class="o">==</span> <span class="s1">&#39;cuda&#39;</span>
+    <span class="n">extra_args</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">fused</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="k">if</span> <span class="n">use_fused</span> <span class="k">else</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="n">optimizer</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">optim</span><span class="o">.</span><span class="n">AdamW</span><span class="p">(</span><span class="n">optim_groups</span><span class="p">,</span> <span class="n">lr</span><span class="o">=</span><span class="n">learning_rate</span><span class="p">,</span> <span class="n">betas</span><span class="o">=</span><span class="n">betas</span><span class="p">,</span> <span class="o">**</span><span class="n">extra_args</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">optimizer</span>
+</pre></div>
+<p><strong>分组规则只看张量维度</strong>（第 6-7 行），不看参数属于哪个具体模块：</p>
+<ul>
+<li><code>p.dim() &gt;= 2</code>（矩阵/embedding 表，形状至少 2 维）→ 参与 weight decay。<code>nn.Linear.weight</code>、<code>nn.Embedding.weight</code> 都是 2 维，全部在这一组。</li>
+<li><code>p.dim() &lt; 2</code>（标量或 1 维向量）→ <strong>不</strong> decay。<code>RMSNorm.weight</code>（1 维）都在这一组——llama2.c 没有 bias（所有 <code>nn.Linear(..., bias=False)</code>），否则 bias 也会落在这一组。</li>
+</ul>
+<p>这是被广泛采用的经验规则（不是 llama2.c 独创）：weight decay 的本质是对参数的 L2 范数做惩罚，鼓励参数不要过大；对矩阵类参数（真正做变换的&quot;旋钮&quot;）做这个惩罚是合理的正则化，但对 LayerNorm/RMSNorm 的 scale 参数或 bias（本身就该自由取值以匹配数据分布）做同样惩罚容易适得其反，所以约定俗成地把 1 维参数排除在外。</p>
+<p><strong><code>fused=True</code></strong>（第 17 行的前置判断）：PyTorch 的 <code>AdamW</code> 有一个&quot;fused&quot;实现（把每个参数张量的更新公式在 CUDA 层面合并成更少的 kernel launch），只在 GPU（<code>device_type == 'cuda'</code>）且当前 PyTorch 版本支持时才启用——<code>inspect.signature(...).parameters</code> 是运行时反射检查这个关键字参数存不存在，用来兼容旧版本 PyTorch（没有 <code>fused</code> 参数时会直接报 <code>TypeError</code>，所以必须先检查）。</p>
+<h2><code>estimate_mfu</code>：把训练速度换算成&quot;占用了 GPU 理论算力的百分之几&quot;</h2>
+<div class="code-panel"><div class="code-title">model.py -- Transformer.estimate_mfu()</div><pre class="hl-code"><span class="k">def</span><span class="w"> </span><span class="nf">estimate_mfu</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">fwdbwd_per_iter</span><span class="p">,</span> <span class="n">dt</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot; estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS &quot;&quot;&quot;</span>
+    <span class="n">N</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">numel</span><span class="p">()</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">())</span>
+    <span class="n">cfg</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span>
+    <span class="n">L</span><span class="p">,</span> <span class="n">H</span><span class="p">,</span> <span class="n">Q</span><span class="p">,</span> <span class="n">T</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">n_layers</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">n_heads</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">dim</span><span class="o">//</span><span class="n">cfg</span><span class="o">.</span><span class="n">n_heads</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">max_seq_len</span>
+<span class="hll">    <span class="n">flops_per_token</span> <span class="o">=</span> <span class="mi">6</span><span class="o">*</span><span class="n">N</span> <span class="o">+</span> <span class="mi">12</span><span class="o">*</span><span class="n">L</span><span class="o">*</span><span class="n">H</span><span class="o">*</span><span class="n">Q</span><span class="o">*</span><span class="n">T</span>
+</span><span class="hll">    <span class="n">flops_per_fwdbwd</span> <span class="o">=</span> <span class="n">flops_per_token</span> <span class="o">*</span> <span class="n">T</span>
+</span><span class="hll">    <span class="n">flops_per_iter</span> <span class="o">=</span> <span class="n">flops_per_fwdbwd</span> <span class="o">*</span> <span class="n">fwdbwd_per_iter</span>
+</span><span class="hll">    <span class="n">flops_achieved</span> <span class="o">=</span> <span class="n">flops_per_iter</span> <span class="o">*</span> <span class="p">(</span><span class="mf">1.0</span><span class="o">/</span><span class="n">dt</span><span class="p">)</span> <span class="c1"># per second</span>
+</span>    <span class="n">flops_promised</span> <span class="o">=</span> <span class="mf">312e12</span> <span class="c1"># A100 GPU bfloat16 peak flops is 312 TFLOPS</span>
+    <span class="n">mfu</span> <span class="o">=</span> <span class="n">flops_achieved</span> <span class="o">/</span> <span class="n">flops_promised</span>
+    <span class="k">return</span> <span class="n">mfu</span>
+</pre></div>
+<p><code>flops_per_token = 6*N + 12*L*H*Q*T</code>（第 6 行）这个公式<strong>不是 llama2.c 自己推导的</strong>，注释直接标注了出处——PaLM 论文附录 B（<code>https://arxiv.org/abs/2204.02311</code>）给出的 Transformer 前向+反向总 FLOPs 近似公式：<code>6N</code> 项对应&quot;每个参数在一次前向+反向里大约参与 6 次浮点运算&quot;（矩阵乘法的标准估算），<code>12*L*H*Q*T</code> 项是 attention 机制本身（跟序列长度 <code>T</code> 平方相关的部分，这里已经按每 token 摊薄）的修正项。<code>N</code>（参数总数）、<code>L/H/Q/T</code>（层数/头数/每头维度/序列长度）全部从 <code>self.parameters()</code>/<code>self.params</code>（也就是真实的 <code>ModelArgs</code>）现取，不是硬编码的估计值。</p>
+<p><strong>换算链路</strong>：每次前向+反向的 FLOPs（<code>flops_per_fwdbwd</code>）× 每次迭代做几次（<code>fwdbwd_per_iter</code>，对应梯度累积步数）÷ 这次迭代实际花的时间 <code>dt</code> = 每秒实际达到的 FLOPs（<code>flops_achieved</code>）；除以 A100 显卡 bfloat16 理论峰值算力 <code>312e12</code>，就是&quot;实际利用率&quot;（MFU，Model FLOPs Utilization）。这个指标是训练大模型时的标准工程诊断量——<code>312e12</code> 这个数字硬编码成 A100 的峰值，换其他型号 GPU 这个函数就需要改常量，本身是一个已知的、有意为之的简化（只针对作者训练时用的硬件）。</p>
+<div class="aside">
+<b>训练循环里怎么用：</b><code>train.py</code> 每 <code>log_interval</code> 步调用一次 <code>raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)</code>，再用 <code>running_mfu = 0.9 * running_mfu + 0.1 * mfu</code> 做指数滑动平均——单次测量噪声大，滑动平均能看出稳定趋势，这跟 <code>estimate_loss()</code> 用多个 batch 平均是同一种"用统计平滑单点噪声"的工程思路。
+</div>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>
