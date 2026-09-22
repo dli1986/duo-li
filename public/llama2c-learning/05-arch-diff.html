@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class="active"><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="04-pytorch-model.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">5 / 12</span>
+      <a href="06-rope-math.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</h1>
+  <div class="page-prose">
+    <p>llama2.c 与 nanoGPT 共享同一套 Transformer 骨架，但在四个关键部件上做了不同的工程选择——每一处替换都对应 Llama 2 论文的真实设计，不是随手改动。</p>
+<h2>1. RMSNorm vs LayerNorm</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>LayerNorm（nanoGPT）</th>
+<th>RMSNorm（llama2.c）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>归一化目标</td>
+<td>均值 0、方差 1</td>
+<td>只保证均方根（RMS）为 1，不管均值</td>
+</tr>
+<tr>
+<td>计算量</td>
+<td>两次遍历（mean + var）</td>
+<td>一次遍历（mean of squares）</td>
+</tr>
+<tr>
+<td>可学习参数</td>
+<td>scale(γ) + shift(β)</td>
+<td>只有 scale(γ)</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-c"><div class="hl-code"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">rmsnorm</span><span class="p">(</span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">o</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">weight</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="n">ss</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.0f</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="n">ss</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">x</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">x</span><span class="p">[</span><span class="n">j</span><span class="p">];</span><span class="w">   </span><span class="c1">// 只算平方和，不减均值</span>
+<span class="w">    </span><span class="n">ss</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1.0f</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">sqrtf</span><span class="p">(</span><span class="n">ss</span><span class="o">/</span><span class="n">size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">1e-5f</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="n">o</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">weight</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">ss</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">x</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+<span class="p">}</span>
+</pre></div>
+</code></pre>
+<h2>2. RoPE vs 绝对位置 embedding</h2>
+<ul>
+<li>nanoGPT：<code>position_embedding_table = nn.Embedding(block_size, n_embd)</code>，与 token embedding <strong>相加</strong>，是加法式、绝对位置编码。</li>
+<li>llama2.c：<strong>没有位置 embedding 表</strong>，而是把 Q/K 向量两两分组看成复平面向量，按 <code>角度 = pos * freq</code> 做旋转。数学证明与手算例子见「RoPE 深度推导」一页。</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>nanoGPT 绝对位置编码</th>
+<th>RoPE</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>存储</td>
+<td>一张 <code>(seq_len,dim)</code> 表，有长度上限</td>
+<td>无表，现算 cos/sin</td>
+</tr>
+<tr>
+<td>作用方式</td>
+<td>加到 embedding 上</td>
+<td>旋转 Q、K 向量</td>
+</tr>
+<tr>
+<td>保证的不变量</td>
+<td>每个绝对位置唯一向量</td>
+<td>attention score 只依赖相对距离</td>
+</tr>
+</tbody>
+</table>
+<h2>3. SwiGLU vs 经典两层 ReLU FFN</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>nanoGPT（<code>bigram.py</code> <code>FeedFoward</code>）</th>
+<th>llama2.c（<code>model.py</code>/<code>run.c</code> <code>FeedForward</code>）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>结构</td>
+<td><code>Linear(n_embd,4n_embd)→ReLU→Linear(4n_embd,n_embd)</code></td>
+<td><code>w2(SiLU(w1(x)) * w3(x))</code>，3 个矩阵（SwiGLU）</td>
+</tr>
+<tr>
+<td>展宽倍数</td>
+<td>固定 4×</td>
+<td>≈2.67×（<code>2/3*4</code>），再向上取整到 <code>multiple_of</code></td>
+</tr>
+<tr>
+<td>矩阵个数</td>
+<td>2 个</td>
+<td>3 个（<code>w1</code>,<code>w2</code>,<code>w3</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>hidden_dim</code> 纠错</strong>：<code>hidden_dim</code> 是 FFN 内部临时展宽的<strong>宽度</strong>（288→768，for stories15M），<strong>不是层数</strong>！层数是 <code>n_layers</code>（Block 堆叠次数），两者完全独立。<strong>为什么叫&quot;hidden&quot;</strong>：残差流（<code>dim</code>=288）贯穿所有 Block，是对外暴露的接口宽度；<code>hidden_dim</code>（768）只在 FFN 内部临时存在，算完立刻被 <code>w2</code> 压回 <code>dim</code>，不会传给下一层——&quot;hidden&quot;= 不进入残差流、只在子模块内部可见。</p>
+<h2>4. 多头注意力：独立对象 vs 合并大矩阵</h2>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 440" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <defs>
+    <marker id="ar5" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#161b22;stroke:#30363d;stroke-width:1;}
+    .lbl{fill:#e6edf3;font-size:10px;}
+    .sub{fill:#8b949e;font-size:8.8px;font-family:'Segoe UI',sans-serif;}
+    .arrow{stroke:#58a6ff;stroke-width:1.5;fill:none;marker-end:url(#ar5);}
+    .title{fill:#58a6ff;font-size:11px;font-weight:bold;font-family:'Segoe UI',sans-serif;}
+  </style>
+
+  <text class="title" x="20" y="18">nanoGPT 教学版：N 个独立 Head 对象</text>
+  <rect class="box" x="20" y="26" width="100" height="46"/>
+  <text class="lbl" x="30" y="44">Head 0</text>
+  <text class="sub" x="30" y="58">自己的 wq/wk/wv</text>
+  <rect class="box" x="130" y="26" width="100" height="46"/>
+  <text class="lbl" x="140" y="44">Head 1</text>
+  <text class="sub" x="140" y="58">自己的 wq/wk/wv</text>
+  <rect class="box" x="240" y="26" width="100" height="46"/>
+  <text class="lbl" x="250" y="44">Head 2</text>
+  <text class="sub" x="250" y="58">自己的 wq/wk/wv</text>
+
+  <line class="arrow" x1="70" y1="72" x2="180" y2="104"/>
+  <line class="arrow" x1="190" y1="72" x2="190" y2="104"/>
+  <line class="arrow" x1="290" y1="72" x2="200" y2="104"/>
+  <text class="sub" x="200" y="94">torch.cat([...])，N 次小 matmul</text>
+
+  <rect class="box" x="20" y="104" width="340" height="26" fill="#0f1622"/>
+  <text class="lbl" x="30" y="121">合并后的多头输出</text>
+
+  <line x1="20" y1="148" x2="360" y2="148" stroke="#30363d" stroke-dasharray="3,3"/>
+
+  <text class="title" x="20" y="170">llama2.c 工程版：一个大矩阵 + reshape</text>
+  <rect class="box" x="20" y="178" width="340" height="34" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="lbl" x="30" y="199" fill="#bc8cff">wq: nn.Linear(dim, n_heads*head_size)</text>
+
+  <line class="arrow" x1="190" y1="212" x2="190" y2="240"/>
+  <text class="sub" x="200" y="230">1 次大 matmul（BLAS/cache 利用率更高）</text>
+
+  <rect class="box" x="20" y="240" width="340" height="34" fill="#0f1622"/>
+  <text class="lbl" x="30" y="261">q: (B, T, n_heads*head_size)</text>
+
+  <line class="arrow" x1="190" y1="274" x2="190" y2="300"/>
+  <text class="sub" x="200" y="292">.view(n_heads, head_size)（不拷贝）</text>
+
+  <rect class="box" x="20" y="300" width="106" height="40"/>
+  <text class="lbl" x="30" y="316" font-size="9">head 0</text>
+  <text class="sub" x="30" y="330">q + 0*head_size</text>
+  <rect class="box" x="137" y="300" width="106" height="40"/>
+  <text class="lbl" x="147" y="316" font-size="9">head 1</text>
+  <text class="sub" x="147" y="330">q + 1*head_size</text>
+  <rect class="box" x="254" y="300" width="106" height="40"/>
+  <text class="lbl" x="264" y="316" font-size="9">head 2</text>
+  <text class="sub" x="264" y="330">q + 2*head_size</text>
+
+  <rect class="box" x="20" y="356" width="340" height="70" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="lbl" x="35" y="374" fill="#bc8cff" font-weight="bold">GQA（分组查询注意力）</text>
+  <text class="sub" x="35" y="390">n_kv_heads &lt; n_heads 时，kv_mul = n_heads/n_kv_heads，</text>
+  <text class="sub" x="35" y="404">(h/kv_mul)*head_size 让多个 query 头共享同一段 kv 内存——</text>
+  <text class="sub" x="35" y="418">本质是多逻辑下标映射到同一物理偏移，类似广播但非标准 broadcast。</text>
+</svg>
+</div><div class="diagram-caption">教学版：N 个独立 Head 对象；工程版：一次大 matmul + 指针偏移 reshape</div></div>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>nanoGPT 教学版（<code>bigram.py</code>）</th>
+<th>llama2.c 工程版（<code>model.py</code>/<code>run.c</code>）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>多头怎么实现</td>
+<td>真的 new 出 N 个独立 <code>Head</code> 对象，各自有自己的 K/Q/V 权重</td>
+<td><strong>一个</strong> <code>wq=nn.Linear(dim, n_heads*head_dim)</code> 大矩阵</td>
+</tr>
+<tr>
+<td>&quot;头&quot;是什么</td>
+<td>独立存储、独立计算</td>
+<td>对同一份输出的 <code>.view()+.transpose()</code>（reshape，不拷贝）</td>
+</tr>
+<tr>
+<td>合并多头结果</td>
+<td><code>torch.cat([h(x) for h in heads])</code>，N 次小 matmul</td>
+<td>1 次大 matmul，<code>run.c</code> 里 <code>s-&gt;q + h*head_size</code> 纯指针 offset</td>
+</tr>
+</tbody>
+</table>
+<p><strong>为什么工程版不用独立对象</strong>：一次大矩阵乘法比 N 次小矩阵乘法快得多（BLAS/cache 利用率）。<code>run.c</code> 的 <code>s-&gt;q + h * head_size</code> 就是 C 语言版本的 <code>.view(n_heads, head_dim)</code>。</p>
+<p><strong>GQA（分组查询注意力）</strong>：<code>n_kv_heads &lt; n_heads</code> 时，<code>kv_mul = n_heads/n_kv_heads</code>，<code>(h/kv_mul)*head_size</code> 让多个 query 头共享同一段 kv 头——本质是&quot;多个逻辑下标映射到同一段物理内存&quot;，类似广播但不是标准 broadcast。</p>
+<h2>5. 输出头与训练工程（预告，详见后续页面）</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>nanoGPT</th>
+<th>llama2.c</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>输出头</td>
+<td>独立 <code>lm_head</code></td>
+<td>与 embedding 权重共享（weight tying）</td>
+</tr>
+<tr>
+<td>优化器</td>
+<td>全部参数一视同仁</td>
+<td>按维度分组 decay（2D+ 权重 decay，1D 不 decay）</td>
+</tr>
+<tr>
+<td>学习率</td>
+<td>固定</td>
+<td>warmup + 余弦衰减</td>
+</tr>
+<tr>
+<td>训练粒度</td>
+<td>每步都更新</td>
+<td>梯度累积（<code>gradient_accumulation_steps</code>）</td>
+</tr>
+<tr>
+<td>混合精度/编译/DDP</td>
+<td>无</td>
+<td><code>bfloat16</code> + <code>torch.compile</code> + <code>DDP</code></td>
+</tr>
+<tr>
+<td>推理生成</td>
+<td>无 KV cache，朴素重算</td>
+<td><code>run.c</code> 用 KV cache，增量解码</td>
+</tr>
+</tbody>
+</table>
+<p>完整的 12 维度对照表见「nanoGPT vs llama2.c 全流程对照」一页。</p>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

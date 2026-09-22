@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>run.c 工程实现：mmap、checkpoint 与无 batched prefill — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class="active"><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="08-runstate-vs-weights.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">9 / 12</span>
+      <a href="10-training-engineering.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</h1>
+  <div class="page-prose">
+    <h2><code>read_checkpoint</code>/<code>mmap</code>：一种&quot;裸序列化&quot;</h2>
+<ul>
+<li><strong>不是</strong>带 schema 的序列化（JSON/Protobuf 那种），而是 <code>export.py</code> 按固定顺序把 header + 权重原始字节写入文件，<code>run.c</code> 按同样顺序 reinterpret，零解析。</li>
+<li><strong><code>mmap</code> 的关键特点是&quot;零拷贝 + 按需换页（demand paging）&quot;</strong>，不是&quot;读的更快&quot;：
+<ul>
+<li><code>mmap()</code> 调用本身几乎不做 I/O，只在虚拟地址空间登记映射。</li>
+<li>真正的磁盘读取发生在<strong>第一次访问</strong>某页时（缺页中断触发）。</li>
+<li>内存页<strong>就是</strong>页缓存本身，不会在堆里再拷贝一份。</li>
+</ul>
+</li>
+</ul>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 420" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <style>
+    .lbl{fill:#e6edf3;font-size:10px;}
+    .sub{fill:#8b949e;font-size:8.8px;font-family:'Segoe UI',sans-serif;}
+    .title{fill:#58a6ff;font-size:11px;font-weight:bold;font-family:'Segoe UI',sans-serif;}
+    .barA{fill:#2a1414;stroke:#f85149;}
+    .barB{fill:#0f2415;stroke:#3fb950;}
+    .tick{fill:#3fb950;}
+  </style>
+
+  <text class="title" x="20" y="18">read()+malloc：必须读完整个文件才能开始</text>
+  <rect x="20" y="26" width="60" height="30" fill="#161b22" stroke="#30363d"/>
+  <text class="lbl" x="27" y="45" font-size="9">open()</text>
+  <rect class="barA" x="82" y="26" width="200" height="30"/>
+  <text class="lbl" x="92" y="45" font-size="9" fill="#f85149">阻塞读取整个文件（fread）</text>
+  <rect x="284" y="26" width="76" height="30" fill="#0f2415" stroke="#3fb950"/>
+  <text class="lbl" x="292" y="45" font-size="9" fill="#3fb950">开始用</text>
+  <text class="sub" x="20" y="70">启动延迟高；内存占用=页缓存+堆内存，双倍</text>
+
+  <line x1="20" y1="90" x2="360" y2="90" stroke="#30363d" stroke-dasharray="3,3"/>
+
+  <text class="title" x="20" y="110">mmap：几乎立即返回，按需换页</text>
+  <rect x="20" y="118" width="70" height="30" fill="#0f2415" stroke="#3fb950"/>
+  <text class="lbl" x="27" y="137" font-size="9" fill="#3fb950">mmap()</text>
+  <rect x="94" y="118" width="266" height="30" fill="#161b22" stroke="#30363d"/>
+  <text class="tick" cx="0" cy="0" x="114" y="137" font-size="9">▮</text>
+  <text class="tick" x="164" y="137" font-size="9">▮</text>
+  <text class="tick" x="214" y="137" font-size="9">▮</text>
+  <text class="tick" x="264" y="137" font-size="9">▮</text>
+  <text class="tick" x="314" y="137" font-size="9">▮</text>
+  <text class="lbl" x="94" y="164" font-size="8.5" fill="#8b949e">立即开始用，缺页中断时才触发单页磁盘读取</text>
+
+  <text class="sub" x="20" y="184">内存页就是页缓存本身，不在堆里再拷贝一份；</text>
+  <text class="sub" x="20" y="198">干净只读页，内存压力大时可直接丢弃重读，无需写 swap</text>
+
+  <rect x="20" y="216" width="340" height="90" fill="#2a1414" stroke="#f85149" rx="4"/>
+  <text class="lbl" x="35" y="236" fill="#f85149" font-weight="bold">HDD 场景的反直觉之处</text>
+  <text class="sub" x="35" y="252">memory_map_weights 按「权重类型跨层」整体分块存储，</text>
+  <text class="sub" x="35" y="266">但 forward() 按「层」遍历——每层都要在文件里跳着访问</text>
+  <text class="sub" x="35" y="280">9 个分散区域，打断内核顺序预读（readahead）优化。</text>
+  <text class="sub" x="35" y="296">在 HDD 上，这种跳跃寻道可能比一次性顺序读整个文件更慢。</text>
+
+  <rect x="20" y="318" width="340" height="86" fill="#1e1530" stroke="#bc8cff" rx="4"/>
+  <text class="lbl" x="35" y="336" fill="#bc8cff" font-weight="bold">优势场景是 SSD / 热页缓存 / 多进程共享</text>
+  <text class="sub" x="35" y="352">而非「任何介质下都更快」这个容易被过度泛化的说法。</text>
+  <text class="sub" x="35" y="368">另外：run.c 没有 batched prefill——generate() 每次只处理</text>
+  <text class="sub" x="35" y="384">1 个 token，即使消化 prompt 阶段也是逐 token 调用</text>
+  <text class="sub" x="35" y="398">forward()，为 700 行的极简目标牺牲了这项工程优化。</text>
+</svg>
+</div><div class="diagram-caption">mmap 立即返回、按需换页；read+malloc 必须先阻塞读完整个文件</div></div>
+<p><strong>与 <code>fread+malloc</code> 对比</strong>（针对大模型，如 26GB checkpoint）：</p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th><code>read</code>+<code>malloc</code></th>
+<th><code>mmap</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>启动延迟</td>
+<td>必须读完整个文件才能开始</td>
+<td>立即返回，I/O 分摊到后续访问</td>
+</tr>
+<tr>
+<td>内存占用</td>
+<td>页缓存 + 堆内存，双倍</td>
+<td>只有一份</td>
+</tr>
+<tr>
+<td>内存压力下行为</td>
+<td>dirty 匿名页，驱逐需写 swap</td>
+<td>干净只读页，可直接丢弃重新读</td>
+</tr>
+<tr>
+<td>多进程共享</td>
+<td>各自一份</td>
+<td>共享同一份物理页</td>
+</tr>
+</tbody>
+</table>
+<h2>HDD 场景下 mmap 反而可能更慢——权重文件的物理布局是关键</h2>
+<p><code>memory_map_weights</code> 的布局是&quot;<strong>按权重类型跨所有层</strong>&quot;整体分块（<code>[rms_att×6层][wq×6层][wk×6层]...</code>），但 <code>forward()</code> 的循环是<strong>按层</strong>遍历，每层都要在文件里&quot;横跳&quot;访问 9 个分散区域，访问完又跳回文件前部取下一层——这是拉锯式访问，不是顺序读。加上 <code>matmul</code> 会摸到<strong>整个</strong>权重矩阵（即使只算一个 token），所以第一次 <code>forward()</code> 调用几乎要触碰整个权重文件，只是以&quot;来回跳&quot;的方式，不是顺序。</p>
+<p><strong>在 HDD 上，这种跳跃访问会打断内核的顺序预读（readahead）优化，可能导致大量寻道，反而比 <code>read+malloc</code> 一次性顺序读整个文件更慢</strong>——这是&quot;mmap 更快&quot;这个说法容易被过度泛化的地方，它的优势场景其实是 SSD/热页缓存/多进程共享，不是任何介质下都更快。</p>
+<h2><code>run.c</code> 没有 batched prefill</h2>
+<p><code>generate()</code> 的循环<strong>每次只调用 <code>forward()</code> 处理一个 token</strong>，即使是&quot;消化 prompt&quot;阶段也是逐 token 调用、只是强制把采样结果替换成已知的下一个 prompt token：</p>
+<pre><code class="language-c"><div class="hl-code"><pre><span></span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">steps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">logits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">forward</span><span class="p">(</span><span class="n">transformer</span><span class="p">,</span><span class="w"> </span><span class="n">token</span><span class="p">,</span><span class="w"> </span><span class="n">pos</span><span class="p">);</span><span class="w">   </span><span class="c1">// 一次只处理一个token</span>
+<span class="w">    </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_prompt_tokens</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">prompt_tokens</span><span class="p">[</span><span class="n">pos</span><span class="o">+</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">sample</span><span class="p">(</span><span class="n">sampler</span><span class="p">,</span><span class="w"> </span><span class="n">logits</span><span class="p">);</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</pre></div>
+</code></pre>
+<p>这跟生产级 LLM 推理（vLLM 等）&quot;prompt 整体 batch 过一次算出全部 KV&quot;的 prefill 优化不同——<code>run.c</code> 为了 700 行的极简目标，牺牲了这个优化。</p>
+<div class="aside">
+<b>工程取舍的共同主线：</b>这一页三个决定（裸序列化、mmap 的真实优势场景、无 batched prefill）都指向同一件事——<code>run.c</code> 的设计目标是"最少代码看懂完整推理链路"，不是"生产级最优性能"。理解这个目标，才能正确判断哪些简化是有意为之、哪些是留给读者自己扩展的空间。
+</div>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>C 语言里的“张量”：flat array + stride — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class="active"><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="06-rope-math.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">7 / 12</span>
+      <a href="08-runstate-vs-weights.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">7</span>C 语言里的“张量”：flat array + stride</h1>
+  <div class="page-prose">
+    <h2>核心公式：任何形状都是 flat <code>float*</code> + 步长（stride）公式</h2>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 430" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <style>
+    .cellA{fill:#241d10;stroke:#e3b341;stroke-width:1;}
+    .cellB{fill:#0f2415;stroke:#3fb950;stroke-width:1;}
+    .cellC{fill:#1e1530;stroke:#bc8cff;stroke-width:1;}
+    .lbl{fill:#e6edf3;font-size:9.5px;}
+    .sub{fill:#8b949e;font-size:9px;font-family:'Segoe UI',sans-serif;}
+    .title{fill:#58a6ff;font-size:11px;font-weight:bold;font-family:'Segoe UI',sans-serif;}
+    .formula{fill:#e6edf3;font-size:11px;}
+  </style>
+
+  <text class="title" x="20" y="18">float* 只是一整块连续内存 + 偏移公式</text>
+
+  <text class="sub" x="20" y="36">wq 逻辑形状 (n_layers, dim, dim)：</text>
+  <g>
+    <rect class="cellA" x="20" y="44" width="34" height="26"/><rect class="cellA" x="54" y="44" width="34" height="26"/><rect class="cellA" x="88" y="44" width="34" height="26"/>
+    <rect class="cellB" x="126" y="44" width="34" height="26"/><rect class="cellB" x="160" y="44" width="34" height="26"/><rect class="cellB" x="194" y="44" width="34" height="26"/>
+    <rect class="cellC" x="232" y="44" width="34" height="26"/><rect class="cellC" x="266" y="44" width="34" height="26"/><rect class="cellC" x="300" y="44" width="34" height="26"/>
+    <rect fill="#161b22" stroke="#30363d" x="338" y="44" width="22" height="26"/>
+    <text class="lbl" x="10" y="61" font-size="8" fill="#e3b341" transform="rotate(-90 10 61)"></text>
+  </g>
+  <text class="lbl" x="46" y="86" fill="#e3b341" text-anchor="middle" font-size="8.5">layer 0</text>
+  <text class="lbl" x="160" y="86" fill="#3fb950" text-anchor="middle" font-size="8.5">layer 1</text>
+  <text class="lbl" x="266" y="86" fill="#bc8cff" text-anchor="middle" font-size="8.5">layer 2</text>
+  <text class="lbl" x="349" y="86" text-anchor="middle" font-size="8.5">…</text>
+  <text class="sub" x="20" y="100">每层是一段 dim×dim 的连续区间（图中每格代表若干元素）</text>
+
+  <rect x="20" y="114" width="340" height="70" fill="#0a0e14" stroke="#30363d" rx="4"/>
+  <text class="formula" x="35" y="136">offset(l, i, j) =</text>
+  <text class="formula" x="35" y="154" fill="#e3b341">l · (dim · dim)</text>
+  <text class="formula" x="150" y="154" fill="#e6edf3"> + </text>
+  <text class="formula" x="165" y="154" fill="#3fb950">i · dim</text>
+  <text class="formula" x="225" y="154" fill="#e6edf3"> + </text>
+  <text class="formula" x="240" y="154" fill="#bc8cff">j</text>
+  <text class="sub" x="35" y="172">w-&gt;wq + l*dim*dim + i*dim + j —— 公式写错不报错，只读出垃圾数据</text>
+
+  <line x1="20" y1="200" x2="360" y2="200" stroke="#30363d" stroke-dasharray="3,3"/>
+  <text class="title" x="20" y="220">shape 相同，stride 不同 → 语义完全不同</text>
+
+  <rect x="20" y="230" width="150" height="50" fill="#161b22" stroke="#30363d" rx="4"/>
+  <text class="lbl" x="32" y="250">shape=(2,3)</text>
+  <text class="lbl" x="32" y="266" fill="#58a6ff">stride=(3,1)</text>
+
+  <text class="sub" x="185" y="250">.transpose()</text>
+  <text class="sub" x="185" y="262">零拷贝，只调</text>
+  <text class="sub" x="185" y="274">换 stride 顺序</text>
+
+  <rect x="210" y="230" width="150" height="50" fill="#161b22" stroke="#30363d" rx="4"/>
+  <text class="lbl" x="222" y="250">shape=(3,2)</text>
+  <text class="lbl" x="222" y="266" fill="#58a6ff">stride=(1,3)</text>
+
+  <text class="sub" x="20" y="300">同一块底层内存，只是「从哪个 offset 开始、按什么形状</text>
+  <text class="sub" x="20" y="314">解读」的元数据变了——这也是 PyTorch Tensor 独立维护</text>
+  <text class="sub" x="20" y="328">.shape 和 .stride() 的原因，只存 shape 做不到这件事。</text>
+
+  <rect x="20" y="346" width="340" height="70" fill="#1e1530" stroke="#bc8cff" rx="4"/>
+  <text class="lbl" x="35" y="364" fill="#bc8cff" font-weight="bold">layer 轴是 C 端序列化的人为产物</text>
+  <text class="sub" x="35" y="380">PyTorch 里 self.layers 是 ModuleList，每层是独立对象，</text>
+  <text class="sub" x="35" y="394">从未拼成带 layer 轴的大 tensor —— export.py 逐层写入文件</text>
+  <text class="sub" x="35" y="408">首尾拼接，才制造出这条 run.c 需要的 layer 轴。</text>
+</svg>
+</div><div class="diagram-caption">offset = l·(dim·dim) + i·dim + j —— C 端手写偏移公式做查表</div></div>
+<p>$$\text{offset}(i_1,\dots,i_k) = i_1\cdot(d_2\cdots d_k) + \cdots + i_k$$</p>
+<p><code>float* buffer</code> 本身<strong>不携带任何形状信息</strong>，<code>(vocab_size,dim)</code> 还是 <code>(layer,dim,dim)</code> 完全是代码里怎么解释这串偏移公式。三个实例：</p>
+<table>
+<thead>
+<tr>
+<th>代码</th>
+<th>逻辑形状</th>
+<th>偏移公式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>matmul</code> 里 <code>w[i*n+j]</code></td>
+<td><code>(d,n)</code></td>
+<td>$i\cdot n+j$</td>
+</tr>
+<tr>
+<td><code>w-&gt;wq + l*dim*dim</code></td>
+<td><code>(n_layers,dim,dim)</code></td>
+<td>$l\cdot(dim\cdot dim)+i\cdot dim+j$</td>
+</tr>
+<tr>
+<td><code>key_cache + loff + t*kv_dim</code></td>
+<td><code>(n_layers,seq_len,kv_dim)</code></td>
+<td>$l\cdot(seq\_len\cdot kv\_dim)+t\cdot kv\_dim+\dots$</td>
+</tr>
+</tbody>
+</table>
+<h2>shape-only vs shape+stride：不是记法不同，是表达力不同</h2>
+<p>只存 shape、靠&quot;标准连续假设&quot;现算 stride，<strong>只能表达完全连续的布局</strong>。以下场景必须显式存 stride（与 shape 分离）才能表达：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>只有 shape</th>
+<th>显式 stride</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>转置（transpose）</td>
+<td>做不到（必须拷贝）</td>
+<td><code>stride=(1,d0)</code>，零拷贝</td>
+</tr>
+<tr>
+<td>隔层/跳步抽取</td>
+<td>做不到</td>
+<td><code>stride0 = 2*(d1*d2)</code></td>
+</tr>
+<tr>
+<td>广播（broadcast）</td>
+<td>做不到</td>
+<td><code>stride=0</code></td>
+</tr>
+</tbody>
+</table>
+<p>PyTorch 的 <code>Tensor</code> 独立维护 <code>.shape</code> 和 <code>.stride()</code> 正是因为这个原因——<code>transpose()</code> 零拷贝就是把 stride 顺序倒过来，shape 变了但底层数据没动。</p>
+<h2><code>TransformerWeights</code> 的 shape 注释：小心&quot;读法&quot; vs &quot;存法&quot;</h2>
+<p>注释 <code>wq: (layer, dim, n_heads*head_size)</code> 写的是&quot;输入维度→输出维度&quot;的<strong>人话描述</strong>（对应 <code>nn.Linear(dim, n_heads*head_size)</code> 构造函数参数顺序），但<strong>真实内存布局/<code>matmul</code> 按 <code>(d,n)</code> 解读的顺序是反的</strong>（<code>n_heads*head_size, dim</code>），跟 PyTorch 真正的 <code>.weight.shape=(out_features,in_features)</code> 一致。这是文档书写习惯 vs 实际存储顺序的一个典型不一致案例，读代码时不能只看注释字面意思。</p>
+<h2>指针 offset：保证性能，不保证正确性</h2>
+<ul>
+<li><strong>保证的是性能</strong>：O(1) 算术定位，零拷贝。</li>
+<li><strong>不保证正确性</strong>：完全依赖&quot;写入偏移公式&quot;和&quot;读取偏移公式&quot;手工保持一致，没有任何格式层面的校验。一个公式写错，不会报错，只会静默读出错位的垃圾数据。C++ 可以用封装（把偏移公式只写一处，比如构造函数里）来降低这个风险，但&quot;零拷贝、指针算术&quot;这个底层机制本身不会因为用了 class 就自动变得更安全。</li>
+</ul>
+<h2>&quot;layer&quot;轴是 C 端序列化的人为产物，不是 PyTorch tensor 的真实形状</h2>
+<ul>
+<li>激活值 <code>h</code>：<code>(B,T,C)</code>，在 <code>for layer in self.layers</code> 循环里被反复覆写，没有 layer 轴。</li>
+<li>权重：<code>self.layers</code> 是 <code>nn.ModuleList</code>，每层是<strong>独立 Python 对象</strong>（<code>self.layers[0].attention.wq.weight</code> 各自形状 <code>(dim,dim)</code>），PyTorch 从没把它们拼成一个带 layer 轴的大 tensor。</li>
+<li><code>run.c</code> 注释里的 <code>layer</code> 轴，来自 <code>export.py</code> 把 <code>n_layers</code> 个独立小矩阵<strong>首尾拼接</strong>进一个文件的动作（<code>for layer in model.layers: serialize_fp32(...)</code>）——是 C 端为了用一个 mmap 指针 + 偏移量寻址，人为制造出来的轴。</li>
+<li>唯一没有 <code>layer</code> 前缀的 <code>token_embedding_table</code>/<code>rms_final_weight</code>，对应 <code>model.py</code> 里<strong>不属于</strong> <code>self.layers</code>、只在 <code>Transformer</code> 类里出现一次的字段（<code>self.tok_embeddings</code>、<code>self.norm</code>）。</li>
+</ul>
+<h2>Tensor 不是 list——底层永远是&quot;一整块连续内存&quot;</h2>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="o">&gt;&gt;&gt;</span> <span class="nb">input</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="mi">5</span><span class="p">],[</span><span class="mi">4</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">9</span><span class="p">]])</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="nb">input</span><span class="o">.</span><span class="n">shape</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">Size</span><span class="p">([</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">])</span>
+</pre></div>
+</code></pre>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Python <code>list</code></th>
+<th><code>torch.Tensor</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>内存布局</td>
+<td>一堆指针，每个指向别处一个独立对象，可混装不同类型</td>
+<td><strong>一整块连续内存</strong>，同一种类型的原始数字</td>
+</tr>
+<tr>
+<td>多维怎么表达</td>
+<td>靠 list 嵌套 list 这个<strong>真实存在</strong>的结构</td>
+<td>靠 flat 内存 + shape/stride 公式，跟嵌套结构无关</td>
+</tr>
+<tr>
+<td>构造语法里的嵌套</td>
+<td>就是真实结构本身</td>
+<td>只是给 <code>torch.tensor()</code> 看的语法糖，造出来之后嵌套就&quot;拉平&quot;消失了</td>
+</tr>
+<tr>
+<td><code>x[i]</code> 取到的是什么</td>
+<td>一个<strong>本来就独立存在</strong>的对象</td>
+<td>一个新计算出来的 <strong>view</strong>——共享同一块底层内存，没有拷贝</td>
+</tr>
+</tbody>
+</table>
+<p><code>torch.tensor([[1,2,4,5],[4,3,2,9]])</code> 这个 <code>(2,4)</code> 张量，底层就是一整块内存 <code>[1,2,4,5,4,3,2,9]</code> 加上&quot;形状是 <code>(2,4)</code>&quot;这份元数据——<code>input[0,2]</code> 取到 <code>4</code>，本质是按 <code>offset=0*4+2=2</code> 去这块 flat 内存取第 2 个位置的值，跟 <code>run.c</code> 里 <code>w[i*n+j]</code>、<code>l*dim*dim</code> 是<strong>同一套底层原理</strong>。这也是为什么 <code>tensor[i]</code> 改了会影响原数据（共享内存的 view），而 <code>list[i]</code> 改了通常不会牵连外层——两者&quot;看起来都能用 <code>[i]</code> 取子结构&quot;，但语义完全不同。</p>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

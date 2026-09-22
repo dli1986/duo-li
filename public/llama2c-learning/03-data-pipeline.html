@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>训练数据管道：tinystories.py — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class="active"><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="02-tokenizer.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">3 / 12</span>
+      <a href="04-pytorch-model.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">3</span>训练数据管道：tinystories.py</h1>
+  <div class="page-prose">
+    <h2>三个阶段</h2>
+<p><code>tinystories.py</code> 把原始故事文本变成训练可用的 token id 序列，分三步：</p>
+<ol>
+<li><strong><code>download()</code></strong>：下载解压 TinyStories 为 50 个 <code>.json</code> shard。</li>
+<li><strong><code>train_vocab(vocab_size)</code></strong>：<strong>可选</strong>，只有 <code>vocab_source=&quot;custom&quot;</code> 时才需要——用 <code>SentencePieceTrainer</code> 在语料上<strong>训练</strong>一套新的 BPE 子词规则，<code>vocab_size</code> 是<strong>设定的目标</strong>，不是数出来的。默认 <code>vocab_source=&quot;llama2&quot;</code> 时<strong>跳过这一步</strong>，直接用 Meta 官方 <code>tokenizer.model</code>（32000 token）。</li>
+<li><strong><code>pretokenize(vocab_size)</code></strong>：调用 <code>process_shard</code> 把每个 shard 的故事文本编码成 token id，写成 <code>dataXX.bin</code>。</li>
+</ol>
+<h2><code>process_shard</code>：并行处理 50 个 shard</h2>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="n">fun</span> <span class="o">=</span> <span class="n">partial</span><span class="p">(</span><span class="n">process_shard</span><span class="p">,</span> <span class="n">vocab_size</span><span class="o">=</span><span class="n">vocab_size</span><span class="p">)</span>   <span class="c1"># 只是凑参数个数，给 executor.map 用</span>
+<span class="k">with</span> <span class="n">ProcessPoolExecutor</span><span class="p">()</span> <span class="k">as</span> <span class="n">executor</span><span class="p">:</span>
+    <span class="n">executor</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">fun</span><span class="p">,</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">shard_filenames</span><span class="p">))</span>       <span class="c1"># 真正的并行在这里（多进程绕过 GIL）</span>
+</pre></div>
+</code></pre>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 480" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <defs>
+    <marker id="ar3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#161b22;stroke:#30363d;stroke-width:1;}
+    .lbl{fill:#e6edf3;font-size:10px;}
+    .sub{fill:#8b949e;font-size:9px;font-family:'Segoe UI',sans-serif;}
+    .arrow{stroke:#58a6ff;stroke-width:1.6;fill:none;marker-end:url(#ar3);}
+    .alabel{fill:#58a6ff;font-size:9px;font-family:'Segoe UI',sans-serif;}
+  </style>
+
+  <text class="sub" x="20" y="16" fill="#58a6ff" font-size="11" font-weight="bold">50 个 shard 的 .json（原始故事）</text>
+  <rect class="box" x="20" y="22" width="70" height="30"/><text class="lbl" x="30" y="41">shard0</text>
+  <rect class="box" x="96" y="22" width="70" height="30"/><text class="lbl" x="106" y="41">shard1</text>
+  <rect class="box" x="172" y="22" width="30" height="30"/><text class="lbl" x="180" y="41">…</text>
+  <rect class="box" x="208" y="22" width="82" height="30"/><text class="lbl" x="214" y="41">shard49</text>
+
+  <line class="arrow" x1="190" y1="52" x2="190" y2="88"/>
+  <text class="alabel" x="200" y="70">ProcessPoolExecutor.map</text>
+  <text class="alabel" x="200" y="82">(process_shard, 多进程绕开 GIL)</text>
+
+  <text class="sub" x="20" y="106" fill="#58a6ff" font-size="11" font-weight="bold">50 个 dataXX.bin（token id 序列）</text>
+  <rect class="box" x="20" y="112" width="70" height="30"/><text class="lbl" x="30" y="131">data00</text>
+  <rect class="box" x="96" y="112" width="70" height="30"/><text class="lbl" x="106" y="131">data01</text>
+  <rect class="box" x="172" y="112" width="30" height="30"/><text class="lbl" x="180" y="131">…</text>
+  <rect class="box" x="208" y="112" width="82" height="30"/><text class="lbl" x="214" y="131">data49</text>
+
+  <line class="arrow" x1="190" y1="142" x2="190" y2="180"/>
+  <text class="alabel" x="200" y="160">np.memmap（懒加载）</text>
+  <text class="alabel" x="200" y="172">按 max_seq_len 切不重叠定长块，打乱块顺序</text>
+
+  <rect class="box" x="20" y="180" width="340" height="50" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="lbl" x="35" y="200" fill="#bc8cff">PretokDataset.__iter__</text>
+  <text class="sub" x="35" y="216">yield x=chunk[:-1], y=chunk[1:]（对 BOS 边界视而不见）</text>
+
+  <line class="arrow" x1="190" y1="230" x2="190" y2="266"/>
+  <text class="alabel" x="200" y="252">DataLoader(pin_memory=True)</text>
+
+  <rect class="box" x="20" y="266" width="340" height="44"/>
+  <text class="lbl" x="35" y="286">Task.iter_batches(batch_size, device)</text>
+  <text class="sub" x="35" y="300">x.to(device, non_blocking=True)（锁页内存才真异步）</text>
+
+  <line x1="20" y1="330" x2="360" y2="330" stroke="#30363d" stroke-dasharray="3,3"/>
+  <text class="sub" x="190" y="326" text-anchor="middle">对比 nanoGPT get_batch()</text>
+
+  <rect class="box" x="20" y="336" width="340" height="44" fill="#0f1622"/>
+  <text class="lbl" x="35" y="356">get_batch(): 整个数据集常驻内存</text>
+  <text class="sub" x="35" y="370">完全随机起点采样，允许窗口重叠</text>
+
+  <text class="sub" x="20" y="404" font-size="9.5">关键差异：llama2.c 是「切块+打乱块顺序」，</text>
+  <text class="sub" x="20" y="418" font-size="9.5">nanoGPT 是「每步都随机选新起点」——都不管故事/</text>
+  <text class="sub" x="20" y="432" font-size="9.5">文档边界，边界信息只能靠 BOS/EOS 这类特殊 token</text>
+  <text class="sub" x="20" y="446" font-size="9.5">让模型自己学。</text>
+</svg>
+</div><div class="diagram-caption">50 个 shard 并行编码，再切成不重叠定长块打乱顺序</div></div>
+<ul>
+<li><code>functools.partial</code> 只是&quot;预先绑定参数&quot;，<strong>跟并行无关</strong>；真正的并行来自 <code>ProcessPoolExecutor</code>（多进程，绕开 Python GIL，适合 CPU 密集型任务）。</li>
+<li><code>enumerate(shard_filenames)</code> 生成 <code>(0,path0), (1,path1), ...</code>——这个编号是 <code>enumerate</code> 动态生成的，不是文件名自带的。</li>
+<li><code>tqdm(data, position=shard_id)</code> 里的 <code>position</code> 只是控制多个并行进度条各画在终端哪一行，纯 UI 效果，跟数据处理逻辑无关。</li>
+<li>每条故事编码时 <code>enc.encode(text, bos=True, eos=False)</code>——<strong>只加 BOS，不加 EOS</strong>。50 个 <code>.json</code> → 50 个 <code>.bin</code>，一一对应。</li>
+</ul>
+<h2><code>PretokDataset</code>：对应 nanoGPT 的 <code>get_batch()</code></h2>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="n">m</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">memmap</span><span class="p">(</span><span class="n">shard</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint16</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s2">&quot;r&quot;</span><span class="p">)</span>     <span class="c1"># 又是 mmap！跟 run.c 读权重同一手法</span>
+<span class="n">num_batches</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">m</span><span class="p">)</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span> <span class="o">-</span> <span class="mi">1</span>          <span class="c1"># 实际是&quot;能切出多少个样本&quot;</span>
+<span class="n">ixs</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">num_batches</span><span class="p">));</span> <span class="n">rng</span><span class="o">.</span><span class="n">shuffle</span><span class="p">(</span><span class="n">ixs</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">ix</span> <span class="ow">in</span> <span class="n">ixs</span><span class="p">:</span>
+    <span class="n">start</span> <span class="o">=</span> <span class="n">ix</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span>
+    <span class="n">end</span> <span class="o">=</span> <span class="n">start</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_seq_len</span> <span class="o">+</span> <span class="mi">1</span>                <span class="c1"># 多取1个token，为了同时切出 x 和 y</span>
+    <span class="n">chunk</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">((</span><span class="n">m</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">])</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">))</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">chunk</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>   <span class="c1"># 长度 = max_seq_len</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">chunk</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span>    <span class="c1"># 长度 = max_seq_len（和 x 等长，只是错位1位）</span>
+    <span class="k">yield</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span>
+</pre></div>
+</code></pre>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>nanoGPT <code>get_batch()</code></th>
+<th><code>PretokDataset</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>采样方式</td>
+<td>完全随机起点（允许重叠）</td>
+<td>切成不重叠固定块，<strong>打乱块的顺序</strong></td>
+</tr>
+<tr>
+<td>底层存储</td>
+<td>整个数据集常驻内存</td>
+<td><code>np.memmap</code> 懒加载，只有 <code>.astype()</code> 那步才真正拷贝进内存</td>
+</tr>
+</tbody>
+</table>
+<p><strong>关键点：<code>max_seq_len</code> 切分对 BOS（<code>&lt;s&gt;</code>）完全&quot;视而不见&quot;</strong>——纯粹按固定长度机械切片，不关心切出来的 chunk 是不是跨越了故事边界。一个训练样本完全可能是&quot;故事 A 结尾 + BOS + 故事 B 开头&quot;拼在一起，模型要自己从 BOS 这个特殊 token 学会&quot;这里是新上下文的开始&quot;。</p>
+<h2><code>Task.iter_batches</code>：Python 工程模式集合</h2>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">Task</span><span class="p">:</span>
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">iter_batches</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">device</span><span class="p">,</span> <span class="n">num_workers</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="o">**</span><span class="n">dataset_kwargs</span><span class="p">):</span>
+        <span class="n">ds</span> <span class="o">=</span> <span class="n">PretokDataset</span><span class="p">(</span><span class="o">**</span><span class="n">dataset_kwargs</span><span class="p">)</span>
+        <span class="n">dl</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">DataLoader</span><span class="p">(</span><span class="n">ds</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">pin_memory</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">num_workers</span><span class="o">=</span><span class="n">num_workers</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="ow">in</span> <span class="n">dl</span><span class="p">:</span>
+            <span class="k">yield</span> <span class="n">x</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">,</span> <span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span> <span class="n">y</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">,</span> <span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</pre></div>
+</code></pre>
+<ul>
+<li><strong><code>@staticmethod</code></strong>：不需要 <code>self</code>，<code>Task</code> 是纯粹的&quot;命名空间类&quot;（不是 GoF 工厂模式），从未被实例化，只是把函数组织在一个有意义的名字下。</li>
+<li><strong><code>**dataset_kwargs</code></strong>：关键字变长参数，用来<strong>透传</strong>——<code>iter_batches</code> 不用把 <code>PretokDataset</code> 需要的 <code>split</code>/<code>max_seq_len</code> 等参数名再抄一遍，直接原样转发，DRY 原则。</li>
+<li>这里的 <code>partial</code> 用途和 <code>tinystories.py</code> 里那次不同：那次是&quot;凑参数个数给 <code>executor.map</code> 用&quot;；这次纯粹是&quot;把基本不变的配置提前绑好，只留 <code>split</code> 每次变化&quot;。</li>
+<li><code>DataLoader</code> 自动把单条 <code>(T,)</code> 样本 stack 成 <code>(B,T)</code>，<code>num_workers</code> 多进程并行预取，<code>pin_memory=True</code> 的作用见「训练工程细节」一页。</li>
+</ul>
+<div class="aside">
+<b>与 nanoGPT 的实质差异：</b>llama2.c 是「切块 + 打乱块顺序」，nanoGPT 是「每步都随机选新起点」——两者都不管故事/文档边界，边界信息只能靠 BOS/EOS 这类特殊 token 让模型自己学，这是数据管道设计上的共同权衡，不是谁更"正确"。
+</div>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

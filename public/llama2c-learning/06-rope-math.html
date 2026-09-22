@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RoPE 深度推导：数学证明与手算例子 — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class="active"><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="05-arch-diff.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">6 / 12</span>
+      <a href="07-c-tensor-layout.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">6</span>RoPE 深度推导：数学证明与手算例子</h1>
+  <div class="page-prose">
+    <p>这一页是对「模型结构差异」里 RoPE 一节的深入补充，对着 <code>model.py</code> 里 <code>precompute_freqs_cis</code>/<code>apply_rotary_emb</code>/<code>register_buffer</code> 的真实代码，把&quot;为什么用旋转&quot;讲到数学证明层面，并用一个可以手算的小例子把&quot;多频率&quot;这件事钉死。</p>
+<h2>数学核心：为什么&quot;旋转&quot;能让 attention score 只依赖相对距离</h2>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 430" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI',sans-serif">
+  <defs>
+    <marker id="ar6" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f0883e"/>
+    </marker>
+    <marker id="ar6b" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+  <style>
+    .axis{stroke:#30363d;stroke-width:1;stroke-dasharray:2,2;}
+    .circle{fill:none;stroke:#21262d;stroke-width:1;}
+    .qv{stroke:#f0883e;stroke-width:2.2;fill:none;marker-end:url(#ar6);}
+    .kv{stroke:#3fb950;stroke-width:2.2;fill:none;marker-end:url(#ar6b);}
+    .lbl{fill:#e6edf3;font-size:12px;}
+    .sub{fill:#8b949e;font-size:10px;}
+    .arcline{stroke:#58a6ff;stroke-width:1.5;fill:none;}
+  </style>
+
+  <text x="20" y="20" font-size="12" font-weight="bold" fill="#58a6ff">RoPE：旋转后的夹角只剩相对距离</text>
+
+  <line class="axis" x1="20" y1="140" x2="360" y2="140"/>
+  <circle class="circle" cx="190" cy="140" r="95"/>
+  <circle cx="190" cy="140" r="2.5" fill="#8b949e"/>
+
+  <!-- q rotated by m*theta -->
+  <line class="qv" x1="190" y1="140" x2="279" y2="108"/>
+  <text class="lbl" x="284" y="104" fill="#f0883e">q' = R(mθ) q</text>
+
+  <!-- k rotated by n*theta -->
+  <line class="kv" x1="190" y1="140" x2="268" y2="195"/>
+  <text class="lbl" x="272" y="212" fill="#3fb950">k' = R(nθ) k</text>
+
+  <!-- arc between q' and k' showing relative angle -->
+  <path class="arcline" d="M 235,120 A 55,55 0 0,1 231,163"/>
+  <text class="lbl" x="240" y="150" fill="#58a6ff" font-size="11">(n−m)θ</text>
+
+  <text class="sub" x="20" y="260">位置 m 的 query 转 mθ，位置 n 的 key 转 nθ，</text>
+  <text class="sub" x="20" y="276">点积 q'·k' 只剩下夹角差 (n−m)θ ——</text>
+  <text class="sub" x="20" y="292">绝对位置 m、n 本身从公式里消失。</text>
+
+  <rect x="20" y="312" width="340" height="100" fill="#1e1530" stroke="#bc8cff" rx="4"/>
+  <text class="lbl" x="35" y="332" fill="#bc8cff" font-weight="bold">为什么 → attention score 只依赖相对距离</text>
+  <text class="sub" x="35" y="350">旋转矩阵是正交变换：只改朝向，不改长度 ‖q‖/‖k‖。</text>
+  <text class="sub" x="35" y="366">R(α)ᵀR(β) = R(β−α) —— 复合旋转的代数性质。</text>
+  <text class="sub" x="35" y="382">对比绝对位置编码 x=tok+pos：点积展开出 4 项交叉，</text>
+  <text class="sub" x="35" y="398">没有干净结构保证「只依赖相对距离」，只能靠训练近似。</text>
+</svg>
+</div><div class="diagram-caption">q 转 mθ、k 转 nθ，点积后夹角只剩 (n-m)θ</div></div>
+<p><strong>几何直觉</strong>：旋转矩阵</p>
+<p>$$R(\theta)=\begin{pmatrix}\cos\theta&amp;-\sin\theta\\\sin\theta&amp;\cos\theta\end{pmatrix}$$</p>
+<p>只改变一个二维向量的<strong>朝向</strong>，不改变它的<strong>长度</strong>（正交变换的定义性质）。</p>
+<p><strong>核心恒等式</strong>（旋转矩阵的复合性质）：</p>
+<p>$$R(\alpha)^T R(\beta) = R(\beta-\alpha)$$</p>
+<p>（先转 $\alpha$ 再转 $\beta$ 的复合效果等于直接转 $\beta-\alpha$；转置 $R(\alpha)^T$ 等价于反着转 $R(-\alpha)$。）</p>
+<p><strong>推导</strong>：位置 $m$ 的 query 先转 $m\theta$ 得到 $q'=R(m\theta)q$，位置 $n$ 的 key 转 $n\theta$ 得到 $k'=R(n\theta)k$，两者点积：</p>
+<p>$$q'\cdot k' = q^T R(m\theta)^T R(n\theta)k = q^T R\big((n-m)\theta\big)k$$</p>
+<p><strong>结果只剩 $(n-m)$，绝对位置 $m,n$ 本身从公式里消失了</strong>——这是&quot;attention score 只依赖相对距离&quot;的<strong>代数证明</strong>，不是拍脑袋设计的规律。</p>
+<p><strong>对比绝对位置编码</strong>：$x_m=\text{tok}_m+\text{pos}_m$，点积 $q\cdot k$ 展开是&quot;内容·内容 + 内容·位置 + 位置·内容 + 位置·位置&quot;四项交叉相加，<strong>没有干净的数学结构能保证&quot;只依赖相对距离&quot;</strong>，模型只能在训练里慢慢近似学出类似的规律，不是架构上写死的保证。</p>
+<h2>RoPE 的额外好处</h2>
+<table>
+<thead>
+<tr>
+<th>好处</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数学上<strong>保证</strong>相对位置性质，不是训练近似出来的</td>
+<td>见上面的代数推导</td>
+</tr>
+<tr>
+<td>长度外推能力更强</td>
+<td>角度=位置×频率是连续函数，遇到训练时没见过的位置也能算出合理角度；绝对位置 embedding 是固定行数的表，超出行数直接没法处理</td>
+</tr>
+<tr>
+<td>不破坏 q/k 的模长语义</td>
+<td>旋转是正交变换，不改变 $\lVert q\rVert$/$\lVert k\rVert$，只改变朝向；绝对位置是加法，会直接改变模长和方向，和内容信息搅在一起</td>
+</tr>
+<tr>
+<td>多频率同时编码&quot;细粒度&quot;和&quot;粗粒度&quot;位置关系</td>
+<td>见下面的具体算例</td>
+</tr>
+</tbody>
+</table>
+<p>位置编码方式和 causal mask 是<strong>两件独立的事</strong>：绝对位置编码、RoPE，两者都要配合 causal mask（上三角 <code>-inf</code>，或 <code>is_causal=True</code>）才能保证&quot;不看未来&quot;——causal mask 解决&quot;允许看谁&quot;，位置编码方式解决&quot;怎么让模型知道位置关系&quot;，不要混在一起理解。</p>
+<h2>具体算例：<code>head_dim=4</code>（2 对频率），4 个位置，手算旋转过程</h2>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="o">&gt;&gt;&gt;</span> <span class="n">freqs</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="p">(</span><span class="mi">10000</span> <span class="o">**</span> <span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span> <span class="o">/</span> <span class="mi">4</span><span class="p">))</span>
+<span class="n">tensor</span><span class="p">([</span><span class="mf">1.0000</span><span class="p">,</span> <span class="mf">0.0100</span><span class="p">])</span>          <span class="c1"># 频率0=1.0(快)，频率1=0.01(慢)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">t</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">3</span><span class="p">])</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">freqs</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">outer</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">freqs</span><span class="p">)</span>
+<span class="n">tensor</span><span class="p">([[</span><span class="mf">0.0000</span><span class="p">,</span> <span class="mf">0.0000</span><span class="p">],</span>
+        <span class="p">[</span><span class="mf">1.0000</span><span class="p">,</span> <span class="mf">0.0100</span><span class="p">],</span>
+        <span class="p">[</span><span class="mf">2.0000</span><span class="p">,</span> <span class="mf">0.0200</span><span class="p">],</span>
+        <span class="p">[</span><span class="mf">3.0000</span><span class="p">,</span> <span class="mf">0.0300</span><span class="p">]])</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">freqs_cos</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">freqs</span><span class="p">)</span>
+<span class="n">tensor</span><span class="p">([[</span> <span class="mf">1.0000</span><span class="p">,</span>  <span class="mf">1.0000</span><span class="p">],</span>
+        <span class="p">[</span> <span class="mf">0.5403</span><span class="p">,</span>  <span class="mf">0.9999</span><span class="p">],</span>
+        <span class="p">[</span><span class="o">-</span><span class="mf">0.4161</span><span class="p">,</span>  <span class="mf">0.9998</span><span class="p">],</span>
+        <span class="p">[</span><span class="o">-</span><span class="mf">0.9900</span><span class="p">,</span>  <span class="mf">0.9996</span><span class="p">]])</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">freqs_sin</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">freqs</span><span class="p">)</span>
+<span class="n">tensor</span><span class="p">([[</span><span class="mf">0.0000</span><span class="p">,</span> <span class="mf">0.0000</span><span class="p">],</span>
+        <span class="p">[</span><span class="mf">0.8415</span><span class="p">,</span> <span class="mf">0.0100</span><span class="p">],</span>
+        <span class="p">[</span><span class="mf">0.9093</span><span class="p">,</span> <span class="mf">0.0200</span><span class="p">],</span>
+        <span class="p">[</span><span class="mf">0.1411</span><span class="p">,</span> <span class="mf">0.0300</span><span class="p">]])</span>
+</pre></div>
+</code></pre>
+<p><strong>关键澄清（容易搞混的点）</strong>：<code>q=[1,0,1,0]</code> 是<strong>一个 token、坐在某个位置上</strong>的 query 向量本身的 4 个数（<code>head_dim=4</code>），<strong>不是&quot;4 个不同位置的 token id&quot;</strong>——&quot;位置&quot;和&quot;q 向量内部的维度&quot;是两条完全独立的轴：</p>
+<ul>
+<li>&quot;位置&quot;决定去 <code>freqs_cos</code>/<code>freqs_sin</code> 表里查<strong>第几行</strong>。</li>
+<li><code>head_dim</code> 决定 <code>q</code> 自己被拆成<strong>几对</strong>、每对配<strong>第几列</strong>（拆分方式固定，不随位置变）。</li>
+</ul>
+<p>假设这个 token 坐在位置 2，取表的第 2 行：<code>freqs_cos[2]=[-0.4161, 0.9998]</code>，<code>freqs_sin[2]=[0.9093, 0.0200]</code>。</p>
+<p><strong>配对规则（容易出错的地方）</strong>：必须是<strong>同一个频率自己的 cos 和 sin 配一对</strong>，不是&quot;两个频率的 cos 配一对、sin 配另一对&quot;：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>频率0（快）在位置2的 (cos,sin)</th>
+<th>频率1（慢）在位置2的 (cos,sin)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>正确配对</td>
+<td>(-0.4161, 0.9093)</td>
+<td>(0.9998, 0.0200)</td>
+</tr>
+</tbody>
+</table>
+<p><code>q</code> 拆成 2 对：第 0 对 $(q_0,q_1)=(1,0)$ 用频率 0，第 1 对 $(q_2,q_3)=(1,0)$ 用频率 1：</p>
+<p>$$\text{第0对}:\begin{pmatrix}-0.4161&amp;-0.9093\\0.9093&amp;-0.4161\end{pmatrix}\begin{pmatrix}1\\0\end{pmatrix}=\begin{pmatrix}-0.4161\\0.9093\end{pmatrix}$$</p>
+<p>$$\text{第1对}:\begin{pmatrix}0.9998&amp;-0.0200\\0.0200&amp;0.9998\end{pmatrix}\begin{pmatrix}1\\0\end{pmatrix}=\begin{pmatrix}0.9998\\0.0200\end{pmatrix}$$</p>
+<p>拼回 4 维：<code>q</code> 从 <code>[1,0,1,0]</code> 变成 <code>[-0.4161, 0.9093, 0.9998, 0.0200]</code>。</p>
+<p><strong>高频/低频的具体体现</strong>：同一个位置（2），第 0 对（频率 1.0）转了 2.0 弧度（约 114.6°，朝向变化很大），第 1 对（频率 0.01）只转了 0.02 弧度（约 1.15°，几乎没变）——<strong>高频对相邻位置的细微差异敏感，低频对只有隔很远的位置才会有明显差异</strong>，类似二进制多个 bit 位同时表达不同数量级的信息。</p>
+<h2>最核心的一句话总结</h2>
+<p><strong>位置信息在&quot;建频率表&quot;（<code>torch.outer(t, freqs)</code>）这一步就已经烘焙进 <code>freqs_cos</code>/<code>freqs_sin</code> 里了</strong>——<code>apply_rotary_emb</code> 里的旋转公式本身是通用的、不知道&quot;位置&quot;这个概念的纯数学运算，它只是老实地拿&quot;查表查出来的某一行 cos/sin&quot;去转 q/k。<code>register_buffer</code> 存的正是这张&quot;提前算好、位置信息已经编码在内&quot;的表，之后每次 forward 只是<strong>查表复用</strong>，不需要重新计算。</p>
+<h2><code>forward()</code> 里一个容易忽略的细节：切片不是查表</h2>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="n">h</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tok_embeddings</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span>          <span class="c1"># gather：tokens 里的 id 可以是任意值、任意顺序、可重复</span>
+<span class="n">freqs_cos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">freqs_cos</span><span class="p">[:</span><span class="n">seqlen</span><span class="p">]</span>      <span class="c1"># slice：永远是&quot;第0行到第seqlen-1行&quot;这一段连续区间</span>
+</pre></div>
+</code></pre>
+<p><code>model.py</code> 的 <code>forward()</code>（训练和 <code>generate()</code> 都一样）<strong>每次都是把当前这整段序列从头到尾重新完整算一遍</strong>（没有 KV cache），所以&quot;这批 token 的位置&quot;永远是&quot;从 0 数到 seqlen-1&quot;，直接切片 <code>[:seqlen]</code> 天然对应。对比 <code>run.c</code>：<code>run.c</code> 显式维护 <code>pos</code> 变量，因为它是逐 token 增量生成（KV cache 已经攒了 N 个，新 token 的位置就是 N，不是从 0 开始）。</p>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

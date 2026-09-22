@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>总览：从 PyTorch 训练到 700 行 C 推理 — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class="active"><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <span class="nav-prev disabled">← 上一节</span>
+      <span class="page-counter">1 / 12</span>
+      <a href="02-tokenizer.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">1</span>总览：从 PyTorch 训练到 700 行 C 推理</h1>
+  <div class="page-prose">
+    <h2>一句话概括</h2>
+<p><code>stories15M.bin</code> 是 Karpathy 用仓库自带的 <code>train.py</code> 在 TinyStories 数据集上训练、再用 <code>export.py</code> 导出的 checkpoint；执行 <code>./run stories15M.bin</code> 是<strong>一次推理</strong>（自回归生成），不是训练。命令行打印的 <code>achieved tok/s</code> 是推理吞吐量，不是训练速度。</p>
+<h2>完整链路</h2>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 600" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <defs>
+    <marker id="ar1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#161b22;stroke:#30363d;stroke-width:1;rx:6;}
+    .lbl{fill:#e6edf3;font-size:11px;}
+    .sub{fill:#8b949e;font-size:9.5px;}
+    .arrow{stroke:#58a6ff;stroke-width:1.6;fill:none;marker-end:url(#ar1);}
+    .alabel{fill:#58a6ff;font-size:9px;font-family:'Segoe UI',sans-serif;}
+  </style>
+
+  <rect class="box" x="20" y="10" width="340" height="40"/>
+  <text class="lbl" x="35" y="28">原始故事文本 (.json ×50)</text>
+  <text class="sub" x="35" y="42">TinyStories 数据集</text>
+
+  <line class="arrow" x1="190" y1="50" x2="190" y2="84"/>
+  <text class="alabel" x="200" y="70">tinystories.py: pretokenize()</text>
+
+  <rect class="box" x="20" y="84" width="340" height="40"/>
+  <text class="lbl" x="35" y="102">dataXX.bin ×50</text>
+  <text class="sub" x="35" y="116">训练数据：token id 序列</text>
+
+  <line class="arrow" x1="190" y1="124" x2="190" y2="158"/>
+  <text class="alabel" x="200" y="144">被 train.py 消费</text>
+
+  <rect class="box" x="20" y="158" width="340" height="48"/>
+  <text class="lbl" x="35" y="178">train.py (PyTorch 训练)</text>
+  <text class="sub" x="35" y="192">forward → loss → backward → optimizer.step</text>
+
+  <line class="arrow" x1="190" y1="206" x2="190" y2="240"/>
+  <text class="alabel" x="200" y="226">export.py</text>
+
+  <rect class="box" x="20" y="240" width="340" height="40"/>
+  <text class="lbl" x="35" y="258">model.bin</text>
+  <text class="sub" x="35" y="272">权重，裸二进制，C 端 mmap 读取</text>
+
+  <line x1="20" y1="298" x2="360" y2="298" stroke="#30363d" stroke-dasharray="3,3"/>
+  <text class="sub" x="190" y="294" text-anchor="middle" fill="#8b949e">— 独立的 tokenizer 管线 —</text>
+
+  <rect class="box" x="20" y="306" width="340" height="40"/>
+  <text class="lbl" x="35" y="324">tokenizer.model</text>
+  <text class="sub" x="35" y="338">Meta 预训练 SentencePiece 词表</text>
+
+  <line class="arrow" x1="190" y1="346" x2="190" y2="380"/>
+  <text class="alabel" x="200" y="366">tokenizer.py: export()</text>
+
+  <rect class="box" x="20" y="380" width="340" height="40"/>
+  <text class="lbl" x="35" y="398">tokenizer.bin</text>
+  <text class="sub" x="35" y="412">score + len + 字节内容，变长记录</text>
+
+  <!-- merge lines down into run.c -->
+  <path class="arrow" d="M 190,280 V 460 H 190" stroke-dasharray="0" fill="none"/>
+  <path d="M 100,420 V 452 H 190" stroke="#58a6ff" stroke-width="1.6" fill="none"/>
+  <line class="arrow" x1="190" y1="452" x2="190" y2="466"/>
+
+  <rect class="box" x="20" y="466" width="340" height="64" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="lbl" x="35" y="486" fill="#bc8cff" font-weight="bold">run.c</text>
+  <text class="sub" x="35" y="500">read_checkpoint (mmap) + build_tokenizer</text>
+  <text class="sub" x="35" y="514">forward(token, pos) 逐 token 循环</text>
+  <text class="sub" x="35" y="526">采样 → 生成文本 (achieved tok/s)</text>
+</svg>
+</div><div class="diagram-caption">三条独立的数据/模型管线，最终在 run.c 里汇合</div></div>
+<p>三条管线各自独立，最后在 C 端汇合：</p>
+<ol>
+<li><strong>训练数据</strong>：TinyStories 原始故事文本（<code>.json</code>）→ <code>tinystories.py</code> 的 <code>pretokenize()</code> → 50 个 <code>dataXX.bin</code>（token id 序列）→ 被 <code>train.py</code> 训练时消费。</li>
+<li><strong>模型权重</strong>：<code>train.py</code>（PyTorch 训练：forward → loss → backward → <code>optimizer.step()</code>）→ <code>export.py</code> → <code>model.bin</code>（权重，C 端可 <code>mmap</code> 读取的裸二进制）。</li>
+<li><strong>词表</strong>：<code>tokenizer.model</code>（Meta 预训练的 SentencePiece 词表）→ <code>tokenizer.py</code> 的 <code>export()</code> → <code>tokenizer.bin</code>（C 端可读的词表格式）。</li>
+</ol>
+<p>最终 <code>run.c</code> 加载 <code>model.bin</code> + <code>tokenizer.bin</code>，进入 <code>forward(token, pos)</code> 的逐 token 前向推理循环，采样后生成文本。</p>
+<h2>为什么要看这份代码</h2>
+<p><code>run.c</code> 全文约 700 行纯 C，没有任何深度学习框架依赖，却能加载并运行与 PyTorch 训练完全等价的 Transformer 权重。这意味着：模型结构本身可以完全脱离 PyTorch 的自动求导/张量库描述——权重不过是一串 <code>float</code>，前向传播不过是几个手写的矩阵乘法 + 归一化 + 激活函数。看懂 <code>run.c</code>，等于看懂了&quot;Transformer 推理&quot;这件事去掉框架糖衣之后剩下的全部本质。</p>
+<div class="aside">
+<b>本站的组织方式：</b>不是按 STUDY_NOTES.md 原始的问答顺序，而是重新划分成「Python/PyTorch 侧 → C 侧内存与工程 → 与 nanoGPT 的逐项对照 → 诚实的学习进度」四个板块，每页一个主题，方便按需查阅。
+</div>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

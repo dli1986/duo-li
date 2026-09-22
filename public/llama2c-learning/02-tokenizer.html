@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tokenizer：BPE、Python 包装 vs C 从零实现 — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class="active"><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="01-overview.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">2 / 12</span>
+      <a href="03-data-pipeline.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</h1>
+  <div class="page-prose">
+    <h2><code>tokenizer.bin</code> ≠ 训练数据打包——两者完全不同，依赖方向也相反</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>dataXX.bin</code>（50 个）</th>
+<th><code>tokenizer.bin</code>（1 个）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>内容</td>
+<td><strong>训练数据</strong>——故事编码后的 token id 序列</td>
+<td><strong>词表本身</strong>——每个 id 对应的字符串 + 分数</td>
+</tr>
+<tr>
+<td>产生方式</td>
+<td><code>process_shard()</code> 调用 <code>enc.encode()</code></td>
+<td><code>tokenizer.py</code> 的 <code>export()</code>，转换自 <code>tokenizer.model</code></td>
+</tr>
+<tr>
+<td>依赖关系</td>
+<td><strong>依赖</strong> <code>tokenizer.model</code>（先有词表才能编码）</td>
+<td>不依赖任何 <code>dataXX.bin</code></td>
+</tr>
+</tbody>
+</table>
+<pre><code><div class="hl-code"><pre><span></span>tokenizer.model(Meta预训练,一份) --export()--&gt; tokenizer.bin(给run.c用)
+                ↓ 被 process_shard() 使用
+原始故事文本(.json) --encode--&gt; dataXX.bin(50个)
+</pre></div>
+</code></pre>
+<h2>Python 侧：<code>Tokenizer.encode()</code> 只是薄包装，不是重新实现 BPE</h2>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">encode</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">s</span><span class="p">,</span> <span class="n">bos</span><span class="p">,</span> <span class="n">eos</span><span class="p">):</span>
+    <span class="n">t</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">sp_model</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>      <span class="c1"># 真正的 BPE 分词，SentencePieceProcessor 自带</span>
+    <span class="k">if</span> <span class="n">bos</span><span class="p">:</span> <span class="n">t</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">bos_id</span><span class="p">]</span> <span class="o">+</span> <span class="n">t</span>     <span class="c1"># 这里才是自己加的逻辑</span>
+    <span class="k">if</span> <span class="n">eos</span><span class="p">:</span> <span class="n">t</span> <span class="o">=</span> <span class="n">t</span> <span class="o">+</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">eos_id</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">t</span>
+</pre></div>
+</code></pre>
+<p>包一层的目的是让 Python 端和 <code>run.c</code> 手写的 C 版本 <code>encode(bos, eos, ...)</code> <strong>接口一致</strong>，不是 SentencePiece 缺功能。真正的 BPE 分词逻辑完全在 <code>sp_model.encode(s)</code> 内部，Python 这边只是加了 BOS/EOS 的前后缀逻辑。</p>
+<h2>C 侧：<code>run.c</code> 从零手写 BPE 贪心合并循环</h2>
+<p><code>run.c</code> 没有依赖 SentencePiece 的 C++ 库，而是自己重新实现了一遍 BPE 的贪心合并算法：</p>
+<pre><code class="language-c"><div class="hl-code"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">n_tokens</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">str_lookup</span><span class="p">(...);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">-1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">t</span><span class="o">-&gt;</span><span class="n">vocab_scores</span><span class="p">[</span><span class="n">id</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">best_score</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">   </span><span class="c1">// 用分数决定优先合并哪一对</span>
+<span class="w">        </span><span class="n">best_score</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="o">-&gt;</span><span class="n">vocab_scores</span><span class="p">[</span><span class="n">id</span><span class="p">];</span><span class="w"> </span><span class="n">best_idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</code></pre>
+<p><strong>为什么每个 token 都需要一个&quot;分数&quot;（score）</strong>——这不是 Llama 专属设计，而是 BPE 贪心合并算法的<strong>结构性要求</strong>：每一轮要在多个&quot;可合并的相邻 token 对&quot;里选出一个优先合并，没有分数就没法裁决优先级，算法根本跑不起来。不同实现里分数的具体计算方式（频率、log 概率、合并顺序）可能不同，但&quot;每个 token 必须有优先级&quot;这件事是共通的。</p>
+<h2><code>export()</code>：byte-for-byte 布局必须与 <code>run.c</code> 的 <code>build_tokenizer</code> 严格对齐</h2>
+<pre><code><div class="hl-code"><pre><span></span>[header: max_token_length (4字节 int)]
+[token0: score(4B float) + len0(4B int) + 内容(len0 字节)]
+[token1: score(4B float) + len1(4B int) + 内容(len1 字节)]
+...
+</pre></div>
+</code></pre>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 400" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <style>
+    .box{fill:#161b22;stroke:#30363d;stroke-width:1;}
+    .field{fill:#0a0e14;stroke:#30363d;stroke-width:1;}
+    .lbl{fill:#e6edf3;font-size:10.5px;}
+    .flbl{fill:#e3b341;font-size:9.5px;}
+    .sub{fill:#8b949e;font-size:9.5px;font-family:'Segoe UI',sans-serif;}
+    .title{fill:#58a6ff;font-size:12px;font-weight:bold;font-family:'Segoe UI',sans-serif;}
+  </style>
+
+  <text class="title" x="20" y="20">tokenizer.bin 字节布局（变长记录）</text>
+
+  <rect class="field" x="20" y="32" width="340" height="26"/>
+  <text class="flbl" x="30" y="49">header: max_token_length (int, 4B)</text>
+
+  <rect class="box" x="20" y="66" width="340" height="80" fill="#0f1622"/>
+  <text class="sub" x="30" y="82">token 0</text>
+  <rect class="field" x="30" y="88" width="90" height="24"/>
+  <text class="flbl" x="36" y="104" font-size="8.5">score (float,4B)</text>
+  <rect class="field" x="126" y="88" width="80" height="24"/>
+  <text class="flbl" x="132" y="104" font-size="8.5">len0 (int,4B)</text>
+  <rect class="field" x="212" y="88" width="130" height="24" fill="#132316" stroke="#3fb950"/>
+  <text class="flbl" x="218" y="104" font-size="8.5" fill="#3fb950">内容 (len0 字节)</text>
+
+  <rect class="box" x="20" y="156" width="340" height="80" fill="#0f1622"/>
+  <text class="sub" x="30" y="172">token 1</text>
+  <rect class="field" x="30" y="178" width="90" height="24"/>
+  <text class="flbl" x="36" y="194" font-size="8.5">score (float,4B)</text>
+  <rect class="field" x="126" y="178" width="80" height="24"/>
+  <text class="flbl" x="132" y="194" font-size="8.5">len1 (int,4B)</text>
+  <rect class="field" x="212" y="178" width="130" height="24" fill="#132316" stroke="#3fb950"/>
+  <text class="flbl" x="218" y="194" font-size="8.5" fill="#3fb950">内容 (len1 字节)</text>
+
+  <text class="sub" x="190" y="256" text-anchor="middle">… 共 vocab_size 个 token，逐条排列 …</text>
+
+  <line x1="20" y1="276" x2="360" y2="276" stroke="#30363d" stroke-dasharray="3,3"/>
+
+  <text class="title" x="20" y="300">对比：权重文件是固定 stride</text>
+  <rect class="field" x="20" y="310" width="80" height="24" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="flbl" x="24" y="326" font-size="8" fill="#bc8cff">layer0</text>
+  <rect class="field" x="102" y="310" width="80" height="24" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="flbl" x="106" y="326" font-size="8" fill="#bc8cff">layer1</text>
+  <rect class="field" x="184" y="310" width="80" height="24" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="flbl" x="188" y="326" font-size="8" fill="#bc8cff">layer2</text>
+  <rect class="field" x="266" y="310" width="74" height="24" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="flbl" x="270" y="326" font-size="8" fill="#bc8cff">…</text>
+  <text class="sub" x="20" y="350">每份等长 → 可用 l*dim*dim 直接算偏移跳转；</text>
+  <text class="sub" x="20" y="364">tokenizer.bin 每条变长 → 只能顺序扫描读取。</text>
+</svg>
+</div><div class="diagram-caption">变长记录格式：只能顺序扫描，不能像权重那样用乘法直接跳到任意位置</div></div>
+<p>这是<strong>变长记录格式</strong>，跟权重文件那种固定 stride 的布局完全不同——<code>run.c</code> 必须<strong>顺序</strong>读，不能像读权重那样用 <code>l*dim*dim</code> 这类乘法公式直接跳到任意 token 的位置，因为每个 token 的字节内容长度都不一样。</p>
+<h2>BOS/EOS：保留的特殊哨兵 id，不是文本内容</h2>
+<ul>
+<li>跟 <code>\n</code>/<code>\r</code> 类比：角色相似（都当分隔符用），但机制不同——<code>\n</code> 是<strong>内容</strong>（文本里本来就有的普通字符），BOS/EOS 是<strong>词表里专门保留、不对应任何真实文字的 id</strong>，正常文本编码不会自然产生它们，只能被 <code>encode()</code> 人为插入。</li>
+<li><strong>不同词表的 BOS/EOS id 不同</strong>（Llama 2 是 <code>&lt;s&gt;</code>=1，<code>&lt;/s&gt;</code>=2），这是每个 tokenizer 自己的设计，没有统一标准。权威来源是 <code>sp_model.bos_id()</code> 这个 API 查询（读的是 <code>.model</code> 文件内嵌的元数据），不是外部文档。</li>
+<li><strong>实际用途</strong>：在拼接后完全同质的 token id 流里充当&quot;故事边界标记&quot;——<code>process_shard</code> 给每条故事开头加 BOS（不加 EOS），后续 <code>avg_seq_len = all_tokens.size / (all_tokens==1).sum()</code> 就是靠数 &quot;1&quot;（BOS id）出现的次数反推有多少条故事。</li>
+</ul>
+<div class="aside evidence">
+<b>证据链：</b>整套 tokenizer 二进制格式的对齐关系是「有代码可查」而非推测——`tokenizer.py` 的 <code>export()</code> 与 <code>run.c</code> 的 <code>build_tokenizer</code> 必须读写同一份字节顺序，这也是为什么变长记录格式在 C 端必须严格顺序解析。
+</div>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

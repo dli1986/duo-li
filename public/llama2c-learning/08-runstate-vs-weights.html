@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RunState vs TransformerWeights：激活值与权重 — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class="active"><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="07-c-tensor-layout.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">8 / 12</span>
+      <a href="09-run-c-engineering.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">8</span>RunState vs TransformerWeights：激活值与权重</h1>
+  <div class="page-prose">
+    <h2>两者的定位对照</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>TransformerWeights</code></th>
+<th><code>RunState</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>内容</td>
+<td>训练学到的、只读、固定的参数</td>
+<td>forward() 过程中算出来的中间结果</td>
+</tr>
+<tr>
+<td>每层几份</td>
+<td><code>n_layers</code> 份（拼接在一个大数组里）</td>
+<td><strong>只有 1 份</strong>，每层循环反复覆写</td>
+</tr>
+<tr>
+<td>生命周期</td>
+<td>从 checkpoint 加载后不变</td>
+<td>一次 forward 调用内产生、消费、丢弃</td>
+</tr>
+</tbody>
+</table>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 460" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <defs>
+    <marker id="ar8" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+  <style>
+    .wbox{fill:#1e1530;stroke:#bc8cff;stroke-width:1;}
+    .abox{fill:#0f2415;stroke:#3fb950;stroke-width:1;}
+    .lbl{fill:#e6edf3;font-size:10px;}
+    .sub{fill:#8b949e;font-size:8.8px;font-family:'Segoe UI',sans-serif;}
+    .title{fill:#58a6ff;font-size:11px;font-weight:bold;font-family:'Segoe UI',sans-serif;}
+    .arrow{stroke:#58a6ff;stroke-width:1.4;fill:none;marker-end:url(#ar8);}
+  </style>
+
+  <text class="title" x="20" y="18">TransformerWeights：n_layers 份，常驻不变</text>
+  <rect class="wbox" x="20" y="26" width="80" height="36"/><text class="lbl" x="30" y="48" fill="#bc8cff">layer 0</text>
+  <rect class="wbox" x="104" y="26" width="80" height="36"/><text class="lbl" x="114" y="48" fill="#bc8cff">layer 1</text>
+  <rect class="wbox" x="188" y="26" width="80" height="36"/><text class="lbl" x="198" y="48" fill="#bc8cff">layer 2</text>
+  <rect class="wbox" x="272" y="26" width="88" height="36"/><text class="lbl" x="282" y="48" fill="#bc8cff">…</text>
+  <text class="sub" x="20" y="76">从 checkpoint 加载后只读，n_layers 份权重并存不覆盖</text>
+
+  <line x1="20" y1="94" x2="360" y2="94" stroke="#30363d" stroke-dasharray="3,3"/>
+
+  <text class="title" x="20" y="114">RunState：只 1 份，像水波一样反复覆写</text>
+  <rect class="abox" x="140" y="122" width="100" height="40"/>
+  <text class="lbl" x="155" y="146" fill="#3fb950">x / xb / hb …</text>
+  <path class="arrow" d="M 240,142 h 40 a 20,20 0 0 1 0,40 h -180 a 20,20 0 0 1 0,-40 h 40" fill="none"/>
+  <text class="sub" x="130" y="200" text-anchor="middle">for l in 0..n_layers: 同一块内存被反复覆写</text>
+
+  <rect x="20" y="216" width="340" height="70" fill="#1e1530" stroke="#bc8cff" rx="4"/>
+  <text class="lbl" x="35" y="234" fill="#bc8cff" font-weight="bold">activation 术语辨析</text>
+  <text class="sub" x="35" y="250">activation function=ReLU/SiLU/softmax 具体非线性函数；</text>
+  <text class="sub" x="35" y="264">activation(s)=前向传播算出的任何中间张量（泛指非权重）——</text>
+  <text class="sub" x="35" y="278">q/k/v/x/xb/logits 多数没过字面激活函数，但仍属于这一大类。</text>
+
+  <line x1="20" y1="300" x2="360" y2="300" stroke="#30363d" stroke-dasharray="3,3"/>
+  <text class="title" x="20" y="320">例外：key_cache / value_cache 只追加，不覆写</text>
+
+  <rect fill="#0f2415" stroke="#3fb950" x="20" y="328" width="52" height="34"/><text class="lbl" x="28" y="349" font-size="8.5">pos0</text>
+  <rect fill="#0f2415" stroke="#3fb950" x="76" y="328" width="52" height="34"/><text class="lbl" x="84" y="349" font-size="8.5">pos1</text>
+  <rect fill="#0f2415" stroke="#3fb950" x="132" y="328" width="52" height="34"/><text class="lbl" x="140" y="349" font-size="8.5">pos2</text>
+  <rect fill="#161b22" stroke="#30363d" stroke-dasharray="3,3" x="188" y="328" width="52" height="34"/><text class="lbl" x="200" y="349" font-size="8.5">…</text>
+  <text class="sub" x="20" y="380">既有 layer 轴也有 position 轴——attention 需要回看</text>
+  <text class="sub" x="20" y="394">所有历史位置的 k/v，新 token 只追加，不清空旧的。</text>
+
+  <text class="sub" x="20" y="420" font-size="8.5">att 形状 (n_heads, seq_len)：存的是分数（标量），第二维</text>
+  <text class="sub" x="20" y="434" font-size="8.5">是历史位置数量，跟单头向量宽度 head_size 是两个不相关的数。</text>
+</svg>
+</div><div class="diagram-caption">权重 n_layers 份常驻；激活值只 1 份，像水波一样反复覆写</div></div>
+<p><strong>&quot;current wave of activations&quot;</strong>：<code>x</code>/<code>xb</code>/<code>hb</code> 等 buffer 只分配一份，<code>for l in 0..n_layers</code> 循环每次都覆写同一块内存——像水波一样冲刷过去，不像权重那样 n_layers 份并存。</p>
+<h2>&quot;activation&quot; 术语辨析</h2>
+<ul>
+<li><strong>activation function</strong>（激活函数）= ReLU/SiLU/softmax 这类具体非线性函数。</li>
+<li><strong>activation(s)</strong>（激活值）= 前向传播中算出的任何中间张量，泛指&quot;不是权重的东西&quot;。</li>
+<li><code>RunState</code> 里大多数字段（<code>q</code>/<code>k</code>/<code>v</code>/<code>x</code>/<code>xb</code>/<code>xb2</code>/<code>logits</code>/两个 cache）<strong>都没有经过字面意义的激活函数</strong>（纯线性变换/加法），但依然属于&quot;activation&quot;这个大类——判断标准是&quot;计算出来的 vs 权重&quot;，不是&quot;过没过非线性函数&quot;。真正过了字面激活函数的只有 <code>hb</code>（SiLU）和勉强算的 <code>att</code>（softmax）。</li>
+</ul>
+<h2>例外：<code>key_cache</code>/<code>value_cache</code>——只追加，不覆写</h2>
+<p>因为 attention 需要回看所有历史位置的 k/v，KV cache <strong>既有 layer 轴也有 position 轴</strong>，新 token 只追加、旧的不清空，跟其它 activation buffer 的&quot;每层覆写一次&quot;行为完全不同。</p>
+<p><code>att</code> 的形状 <code>(n_heads, seq_len)</code>：存的是<strong>分数（标量）</strong>，不是向量，所以第二维是 <code>seq_len</code>（历史位置数量）而非 <code>head_size</code>（单头向量宽度）——两者是完全不相关的两个数（stories15M 里 <code>head_size=48</code>，<code>seq_len=256</code>）。</p>
+<div class="aside evidence">
+<b>为什么这个区分重要：</b>理解 <code>RunState</code> vs <code>TransformerWeights</code> 的生命周期差异，是理解「run.c 工程实现」页里 mmap 加载策略、以及 KV cache 增量解码为什么能把逐 token 推理复杂度从 O(n²) 降到近似 O(n) 的前提——它们分别对应"不变的常量"和"每次 forward 都要重新流过的状态"。
+</div>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

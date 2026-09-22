@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>llama2.c 学习笔记 — 从PyTorch训练到700行C推理</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class=""><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <h1 class="site-title">llama2.c 学习笔记</h1>
+</header>
+<main>
+  <p class="site-subtitle">跟随 Andrej Karpathy 的 <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 项目，以 C/C++ 工程视角通读 <code>run.c</code>，并与 <code>train.py</code>/<code>model.py</code>/<code>tinystories.py</code>/<code>tokenizer.py</code> 及 nanoGPT 逐项对照。共 12 页，每页一个主题，配合手绘 SVG 图解。</p>
+  <div class="scope-note">
+    <b>学习状态说明：</b> 本站内容完全基于作者本人真实的学习笔记（<code>STUDY_NOTES.md</code>）整理，不做超出笔记范围的推测或幻觉性总结。学习目前进行到 <code>model.py</code> 前向传播、RoPE 数学推导、C 端内存布局与工程取舍这一阶段；<code>run.c</code> 的解码采样细节、<code>train.py</code> 学习率调度/优化器分组、PyTorch autograd 反向传播机制等尚未深入，见最后一页「学习进度与下一步」的诚实清单。
+  </div>
+  <ol class="step-list">
+    
+    <li><a href="01-overview.html"><span class="step-badge">1</span><span>总览：从 PyTorch 训练到 700 行 C 推理<span class="step-sub">train.py → export.py → model.bin，run.c 如何加载并生成文本</span></span></a></li>
+    
+    <li><a href="02-tokenizer.html"><span class="step-badge">2</span><span>Tokenizer：BPE、Python 包装 vs C 从零实现<span class="step-sub">SentencePiece 包一层 vs run.c 手写合并循环，二进制格式对齐</span></span></a></li>
+    
+    <li><a href="03-data-pipeline.html"><span class="step-badge">3</span><span>训练数据管道：tinystories.py<span class="step-sub">分片、多进程编码、PretokDataset 与 nanoGPT get_batch 的差异</span></span></a></li>
+    
+    <li><a href="04-pytorch-model.html"><span class="step-badge">4</span><span>PyTorch 模型定义与 nn.Module 注册机制<span class="step-sub">ModelArgs dataclass，__setattr__/__getattr__/__call__ 三个钩子</span></span></a></li>
+    
+    <li><a href="05-arch-diff.html"><span class="step-badge">5</span><span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT<span class="step-sub">四处工程取舍，逐项对照 bigram.py 的教学版实现</span></span></a></li>
+    
+    <li><a href="06-rope-math.html"><span class="step-badge">6</span><span>RoPE 深度推导：数学证明与手算例子<span class="step-sub">为什么旋转能让 attention score 只依赖相对距离</span></span></a></li>
+    
+    <li><a href="07-c-tensor-layout.html"><span class="step-badge">7</span><span>C 语言里的“张量”：flat array + stride<span class="step-sub">TransformerWeights 的 layer 轴是序列化的人为产物</span></span></a></li>
+    
+    <li><a href="08-runstate-vs-weights.html"><span class="step-badge">8</span><span>RunState vs TransformerWeights：激活值与权重<span class="step-sub">一份被反复覆写 vs n_layers 份常驻，KV cache 是例外</span></span></a></li>
+    
+    <li><a href="09-run-c-engineering.html"><span class="step-badge">9</span><span>run.c 工程实现：mmap、checkpoint 与无 batched prefill<span class="step-sub">700 行目标下的真实取舍，以及 mmap 并非总是更快</span></span></a></li>
+    
+    <li><a href="10-training-engineering.html"><span class="step-badge">10</span><span>训练工程细节：pin_memory 与 configurator.py 的取舍<span class="step-sub">DMA 的硬件约束，以及 Karpathy 明知丑陋仍选择的 hack</span></span></a></li>
+    
+    <li><a href="11-comparison-table.html"><span class="step-badge">11</span><span>nanoGPT vs llama2.c 全流程对照<span class="step-sub">12 个维度，从数据源到推理生成逐项对比</span></span></a></li>
+    
+    <li><a href="12-learning-status.html"><span class="step-badge">12</span><span>学习进度与下一步<span class="step-sub">诚实标注：哪些已经吃透，哪些还没深入</span></span></a></li>
+    
+  </ol>
+  <p class="source-links">源笔记：<code>/home/dli/llama2.c/STUDY_NOTES.md</code>（WSL，随学习持续更新）&nbsp;·&nbsp;姊妹项目：<a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></p>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>

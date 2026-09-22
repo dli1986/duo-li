@@ -1,0 +1,39 @@
+---
+title: "llama2c-learning"
+slug: "llama2c-learning"
+status: "active"
+technologies:
+  - "C"
+  - "Python"
+  - "PyTorch"
+  - "Jinja2"
+summary: "A topic-by-topic, mobile-friendly walkthrough of Karpathy's llama2.c — Python/PyTorch model internals, C-side memory layout, and the real engineering tradeoffs behind a 700-line Transformer inference engine."
+repository: "https://github.com/karpathy/llama2.c"
+startDate: "2026-09-22"
+demoUrl: "/llama2c-learning/index.html"
+---
+
+## Overview
+
+A static, one-page-per-topic companion to [llama2.c](https://github.com/karpathy/llama2.c), built directly from my own running study notes rather than the upstream README. 12 pages + 11 hand-authored SVG diagrams, covering the pipeline end to end: `train.py`/`model.py` (PyTorch) → `export.py` → `model.bin` → `run.c` (700 lines of C, no framework) → generated text.
+
+## Topics
+
+- Tokenizer: SentencePiece BPE wrapped in Python vs hand-written merge loop in C, byte-for-byte binary format
+- Training data pipeline (`tinystories.py`): sharding, multiprocessing, `PretokDataset`
+- `nn.Module` internals: `ModelArgs` dataclass, the `__setattr__`/`__getattr__`/`__call__` registration mechanism
+- Architecture differences vs nanoGPT: RMSNorm, RoPE (with full math derivation + worked numeric example), SwiGLU, grouped-query attention
+- C-side memory layout: flat `float*` + stride arithmetic, why the "layer axis" in `TransformerWeights` is a serialization artifact, not a real PyTorch tensor shape
+- `RunState` vs `TransformerWeights`: activations (overwritten each layer) vs weights (persistent, n_layers copies)
+- `run.c` engineering tradeoffs: `mmap` vs `read`+`malloc` (including why `mmap` isn't always faster on HDDs), no batched prefill
+- Training engineering: `pin_memory`/`non_blocking` as a real DMA hardware constraint, `configurator.py`'s deliberately "ugly" design choice
+- Full nanoGPT-vs-llama2.c comparison table across 12 dimensions
+- An honest "learning status" page listing what hasn't been studied yet (`run.c` sampling internals, LR scheduler, autograd) — no fabricated coverage
+
+## Lessons Learned
+
+Applied a lesson from the nanoGPT-learning site directly this time: author diagrams as plain SVG with a narrow intrinsic viewBox (~380-440px) from the start, instead of porting wide desktop canvas layouts and having them shrink to unreadable text on mobile. Also hit and fixed a real bug where CommonMark's backslash-escaping silently corrupted LaTeX matrix row separators (`\\`) before KaTeX ever saw them — fixed by extracting math spans before markdown parsing and restoring them verbatim afterward.
+
+## Roadmap
+
+Companion to [nanoGPT-learning](/nanogpt-learning/index.html) — read that first for Transformer fundamentals, then this for the from-scratch C engineering perspective. Content will be extended once the underlying study notes go deeper into `run.c`'s sampling internals and PyTorch autograd.

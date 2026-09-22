@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PyTorch 模型定义与 nn.Module 注册机制 — llama2.c 学习笔记</title>
+<link rel="stylesheet" href="static/css/style.css?v=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script>
+(function(){
+  var pref = localStorage.getItem('sidebarState') || (window.innerWidth < 981 ? 'closed' : 'open');
+  document.documentElement.setAttribute('data-sidebar', pref);
+})();
+</script>
+</head>
+<body>
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation"></button>
+<nav class="site-sidebar" id="siteSidebar">
+  <a class="brand" href="index.html">llama2.c 学习笔记</a>
+  <ol>
+    
+    <li><a href="01-overview.html" class=""><span class="nav-num">1</span>总览：从 PyTorch 训练到 700 行 C 推理</a></li>
+    
+    <li><a href="02-tokenizer.html" class=""><span class="nav-num">2</span>Tokenizer：BPE、Python 包装 vs C 从零实现</a></li>
+    
+    <li><a href="03-data-pipeline.html" class=""><span class="nav-num">3</span>训练数据管道：tinystories.py</a></li>
+    
+    <li><a href="04-pytorch-model.html" class="active"><span class="nav-num">4</span>PyTorch 模型定义与 nn.Module 注册机制</a></li>
+    
+    <li><a href="05-arch-diff.html" class=""><span class="nav-num">5</span>模型结构差异：RMSNorm / RoPE / SwiGLU / GQA vs nanoGPT</a></li>
+    
+    <li><a href="06-rope-math.html" class=""><span class="nav-num">6</span>RoPE 深度推导：数学证明与手算例子</a></li>
+    
+    <li><a href="07-c-tensor-layout.html" class=""><span class="nav-num">7</span>C 语言里的“张量”：flat array + stride</a></li>
+    
+    <li><a href="08-runstate-vs-weights.html" class=""><span class="nav-num">8</span>RunState vs TransformerWeights：激活值与权重</a></li>
+    
+    <li><a href="09-run-c-engineering.html" class=""><span class="nav-num">9</span>run.c 工程实现：mmap、checkpoint 与无 batched prefill</a></li>
+    
+    <li><a href="10-training-engineering.html" class=""><span class="nav-num">10</span>训练工程细节：pin_memory 与 configurator.py 的取舍</a></li>
+    
+    <li><a href="11-comparison-table.html" class=""><span class="nav-num">11</span>nanoGPT vs llama2.c 全流程对照</a></li>
+    
+    <li><a href="12-learning-status.html" class=""><span class="nav-num">12</span>学习进度与下一步</a></li>
+    
+  </ol>
+</nav>
+<div class="site-main" id="siteMain">
+
+<header class="topbar">
+  <nav class="topnav">
+    <a href="index.html" class="nav-home">← 目录</a>
+    <div class="nav-arrows">
+      <a href="03-data-pipeline.html" class="nav-prev">← 上一节</a>
+      <span class="page-counter">4 / 12</span>
+      <a href="05-arch-diff.html" class="nav-next">下一节 →</a>
+    </div>
+  </nav>
+</header>
+<main>
+  <h1><span class="step-badge">4</span>PyTorch 模型定义与 nn.Module 注册机制</h1>
+  <div class="page-prose">
+    <h2><code>ModelArgs</code>：<code>@dataclass</code> + &quot;Llama 7B 默认值&quot;的真实含义</h2>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">ModelArgs</span><span class="p">:</span>
+    <span class="c1"># default hyperparameters for the Llama 7B model</span>
+    <span class="n">dim</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">4096</span>
+    <span class="n">n_layers</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span>
+    <span class="n">n_heads</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span>
+    <span class="n">vocab_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32000</span>
+    <span class="n">max_seq_len</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2048</span>
+    <span class="o">...</span>
+</pre></div>
+</code></pre>
+<p><code>dim=4096, n_layers=32, n_heads=32, vocab_size=32000, max_seq_len=2048</code> <strong>就是 Meta 官方 LLaMA 7B 的真实架构参数</strong>。README 明确写了&quot;架构与 Meta 的 Llama 2 完全一致，可以直接加载、推理 Meta 发布的真实模型&quot;（对应 <code>export.py</code> 的 <code>--meta-llama</code> 参数）。所以这些默认值的意义是：<strong><code>ModelArgs()</code> 不传参数时，直接就是一份能装下真实 7B checkpoint 的正确配置</strong>，不是随手写的示例。</p>
+<p>在 <code>train.py</code> 训练 TinyStories 这条路径上，这些默认值<strong>从未真正生效</strong>——<code>model_args = dict(dim=dim, n_layers=n_layers, ...)</code> 把 <code>train.py</code> 自己的全局变量（288/6/6，给 stories15M 用）逐字段显式传入，<code>ModelArgs(**model_args)</code> 时 7B 默认值全部被覆盖。只有在某处构造 <code>ModelArgs()</code> 却没传全部字段时，7B 默认值才会真正起作用。</p>
+<p><code>@dataclass</code> 让你只写&quot;字段名: 类型 = 默认值&quot;就自动生成构造函数，<code>ModelArgs(**model_args)</code> 能正确工作，靠的正是这个自动生成的 <code>__init__</code> 按字段名匹配关键字参数——跟 <code>@staticmethod</code>（改变的是方法调用约定，不注入 <code>self</code>）解决的是完全不同的问题。</p>
+<h2><code>nn.Embedding</code>：可学习参数到底存在哪</h2>
+<p><code>nn.Embedding</code> 就是一张查找表，数据存在 <code>.weight</code> 这个普通属性里：</p>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="o">&gt;&gt;&gt;</span> <span class="n">embedding</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>   <span class="c1"># 10行(vocab_size)×3列(embedding_dim)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">embedding</span><span class="o">.</span><span class="n">weight</span>
+<span class="n">Parameter</span> <span class="n">containing</span><span class="p">:</span>
+<span class="n">tensor</span><span class="p">([[</span> <span class="mf">1.0000</span><span class="p">,</span>  <span class="mf">1.0000</span><span class="p">,</span>  <span class="mf">1.0000</span><span class="p">],</span>
+        <span class="p">[</span><span class="o">-</span><span class="mf">0.7895</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.7089</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.0364</span><span class="p">],</span> <span class="o">...</span><span class="p">],</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</pre></div>
+</code></pre>
+<p><code>embedding(input)</code> 做的事情就是&quot;查表&quot;：<code>input</code> 里每个整数是&quot;行号&quot;，输出就是把对应那一行的向量抄出来。这跟 <code>run.c</code> 里的写法是<strong>同一件事，只是换了层皮</strong>：</p>
+<pre><code class="language-c"><div class="hl-code"><pre><span></span><span class="kt">float</span><span class="o">*</span><span class="w"> </span><span class="n">content_row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">w</span><span class="o">-&gt;</span><span class="n">token_embedding_table</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">token</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">dim</span><span class="p">;</span><span class="w">   </span><span class="c1">// C：自己手写偏移公式做查表</span>
+<span class="n">memcpy</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">content_row</span><span class="p">,</span><span class="w"> </span><span class="n">dim</span><span class="o">*</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">x</span><span class="p">));</span>
+</pre></div>
+</code></pre>
+<h2><code>nn.Module</code> 的注册机制：三个独立的 Python magic method 接力完成</h2>
+<div class="diagram-section"><div class="diagram-svg-wrap"><svg viewBox="0 0 380 460" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code',Consolas,monospace">
+  <defs>
+    <marker id="ar4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#161b22;stroke:#30363d;stroke-width:1;}
+    .dst{fill:#0f2415;stroke:#3fb950;stroke-width:1;}
+    .lbl{fill:#e6edf3;font-size:10px;}
+    .code{fill:#e3b341;font-size:9.5px;}
+    .sub{fill:#8b949e;font-size:9px;font-family:'Segoe UI',sans-serif;}
+    .arrow{stroke:#58a6ff;stroke-width:1.5;fill:none;marker-end:url(#ar4);}
+    .hook{fill:#58a6ff;font-size:10px;font-weight:bold;font-family:'Segoe UI',sans-serif;}
+  </style>
+
+  <text class="hook" x="20" y="18">① 写：__setattr__ 拦截</text>
+  <rect class="box" x="20" y="26" width="340" height="26"/>
+  <text class="code" x="30" y="43">self.tok_embeddings = nn.Embedding(...)</text>
+  <line class="arrow" x1="190" y1="52" x2="190" y2="76"/>
+  <text class="sub" x="200" y="68">isinstance(value, Module) ?</text>
+  <rect class="dst" x="20" y="76" width="340" height="26"/>
+  <text class="lbl" x="30" y="93" fill="#3fb950">✓ 存入 self._modules['tok_embeddings']（绕开 __dict__）</text>
+
+  <line x1="20" y1="118" x2="360" y2="118" stroke="#30363d" stroke-dasharray="3,3"/>
+
+  <text class="hook" x="20" y="136">② 读：__getattr__ 兜底</text>
+  <rect class="box" x="20" y="144" width="340" height="26"/>
+  <text class="code" x="30" y="161">self.tok_embeddings</text>
+  <text class="sub" x="140" y="161" fill="#8b949e">← __dict__ 里找不到</text>
+  <line class="arrow" x1="190" y1="170" x2="190" y2="194"/>
+  <text class="sub" x="200" y="186">仅在默认查找失败时触发</text>
+  <rect class="dst" x="20" y="194" width="340" height="26"/>
+  <text class="lbl" x="30" y="211" fill="#3fb950">✓ 从 self._modules['tok_embeddings'] 取回（同一对象，非拷贝）</text>
+
+  <line x1="20" y1="236" x2="360" y2="236" stroke="#30363d" stroke-dasharray="3,3"/>
+
+  <text class="hook" x="20" y="254">③ 调用：__call__ 转发</text>
+  <rect class="box" x="20" y="262" width="340" height="26"/>
+  <text class="code" x="30" y="279">self.tok_embeddings(tokens)</text>
+  <line class="arrow" x1="190" y1="288" x2="190" y2="312"/>
+  <text class="sub" x="200" y="304">Python 语言机制（任意 __call__ 对象）</text>
+  <rect class="dst" x="20" y="312" width="340" height="26"/>
+  <text class="lbl" x="30" y="329" fill="#3fb950">✓ nn.Module.__call__ → 转发到 .forward(tokens)</text>
+
+  <rect class="box" x="20" y="356" width="340" height="90" fill="#1e1530" stroke="#bc8cff"/>
+  <text class="lbl" x="35" y="376" fill="#bc8cff" font-weight="bold">关键纠正</text>
+  <text class="sub" x="35" y="392">h = self.tok_embeddings(tokens) 里的 h 是局部变量赋值，</text>
+  <text class="sub" x="35" y="406">从未经过 self.xxx=，①的 __setattr__ 检查根本没被触发——</text>
+  <text class="sub" x="35" y="420">“hidden”这个名字只是深度学习术语传统，与是否被</text>
+  <text class="sub" x="35" y="434">_parameters/_modules 记录、被 optimizer 更新无因果关系。</text>
+</svg>
+</div><div class="diagram-caption">__setattr__（写）→ __getattr__（读）→ __call__（调用），三个独立钩子</div></div>
+<ul>
+<li><strong><code>__setattr__</code>（写钩子）</strong>：任何类都可以重写，重写后每一次 <code>obj.attr = value</code> 都会先经过这个方法。<code>nn.Module</code> 的实现：如果赋的值是 <code>nn.Parameter</code>，存进 <code>self._parameters</code>；如果是 <code>nn.Module</code>，存进 <code>self._modules</code>；否则才走进普通的 <code>__dict__</code>。<strong>关键纠正</strong>：<code>nn.Parameter</code>/<code>nn.Module</code> 类型的值<strong>根本不会进 <code>__dict__</code></strong>，是直接绕开，不是&quot;先进 <code>__dict__</code> 再被记一笔&quot;。</li>
+<li><strong><code>__getattr__</code>（读的兜底钩子）</strong>：只在&quot;常规方式在 <code>__dict__</code>/类属性里都找不到&quot;时才触发，从 <code>self._parameters</code>/<code>self._modules</code> 里找回来——两条路径（手动模拟查找 vs 触发 <code>__getattr__</code> 自动查找）拿到的是<strong>同一个对象</strong>，因为存的是引用，不是复制。</li>
+<li><strong><code>__call__</code>（调用钩子）</strong>：<code>self.tok_embeddings(tokens)</code> 里的 <code>(tokens)</code> 触发的是 <code>nn.Module.__call__</code>，内部再转发到 <code>.forward(tokens)</code>。&quot;对象能不能被 <code>()</code> 调用&quot;是 Python 语言本身的机制（任何类定义 <code>__call__</code> 都行），&quot;调用后去执行一个叫 <code>forward</code> 的方法&quot;是 <code>nn.Module</code> 自己的框架约定，两者是两个独立层次。</li>
+</ul>
+<p>整个模型因此形成一棵树：<code>Transformer → tok_embeddings(Embedding) → weight(真正的张量)</code>。<code>model.parameters()</code>/<code>model.state_dict()</code> 只是<strong>递归遍历这棵树</strong>，自动收集所有登记过的参数，不需要手动一个个列出来。</p>
+<div class="aside warn">
+<b>容易搞混的点：</b><code>h = self.tok_embeddings(tokens)</code> 里的 <code>h</code> 是普通局部变量赋值，从未经过 <code>self.xxx=</code>，<code>__setattr__</code> 的检查机制根本没被触发过——不是"检查了发现不是 Parameter 所以被排除"。"hidden"这个名字只是深度学习传统术语（隐藏层：不直接暴露给外部的中间表示），跟"是否被 <code>_parameters</code> 记录、是否被 optimizer 更新"没有因果关系，这是两个完全独立的维度。
+</div>
+<h2><code>register_buffer</code>：第三种登记方式</h2>
+<p><code>model.py</code> 里的 RoPE 频率表：</p>
+<pre><code class="language-python"><div class="hl-code"><pre><span></span><span class="n">freqs_cos</span><span class="p">,</span> <span class="n">freqs_sin</span> <span class="o">=</span> <span class="n">precompute_freqs_cis</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">dim</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">n_heads</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">max_seq_len</span><span class="p">)</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">register_buffer</span><span class="p">(</span><span class="s2">&quot;freqs_cos&quot;</span><span class="p">,</span> <span class="n">freqs_cos</span><span class="p">,</span> <span class="n">persistent</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">register_buffer</span><span class="p">(</span><span class="s2">&quot;freqs_sin&quot;</span><span class="p">,</span> <span class="n">freqs_sin</span><span class="p">,</span> <span class="n">persistent</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</pre></div>
+</code></pre>
+<p>存的是第三个独立字典 <code>_buffers</code>——同样不会出现在 <code>__dict__</code> 里。跟 <code>nn.Parameter</code> 的关键区别：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>nn.Parameter</code>（如 <code>tok_embeddings.weight</code>）</th>
+<th><code>register_buffer</code>（如 <code>freqs_cos</code>）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>会不会被 optimizer 更新</td>
+<td>会</td>
+<td><strong>不会</strong></td>
+</tr>
+<tr>
+<td>会不会跟 <code>.to(device)</code> 走</td>
+<td>会</td>
+<td>会（所以不能用普通属性存）</td>
+</tr>
+<tr>
+<td>会不会存进 <code>state_dict()</code></td>
+<td>会</td>
+<td>这里 <code>persistent=False</code> → 明确设成不存，因为随时能用 <code>(head_dim, max_seq_len, theta)</code> 重新算出来，没必要占 checkpoint 体积</td>
+</tr>
+<tr>
+<td>为什么需要显式注册</td>
+<td>类型判断自动路由</td>
+<td>普通 <code>Tensor</code> 光看类型无法区分&quot;该不该是 buffer&quot;，必须手动调用表态</td>
+</tr>
+</tbody>
+</table>
+
+  </div>
+</main>
+
+<footer>基于 <code>/home/dli/llama2.c/STUDY_NOTES.md</code> 整理生成 · 参考 Karpathy <a href="https://github.com/karpathy/llama2.c" target="_blank" rel="noopener">llama2.c</a> 与 <a href="../nanogpt-learning/index.html">nanoGPT 学习笔记</a></footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+(function(){
+  var root = document.documentElement;
+  var btn = document.getElementById('sidebarToggle');
+  btn.addEventListener('click', function(){
+    var next = root.getAttribute('data-sidebar') === 'open' ? 'closed' : 'open';
+    root.setAttribute('data-sidebar', next);
+    localStorage.setItem('sidebarState', next);
+  });
+  document.getElementById('siteMain').addEventListener('click', function(e){
+    if (window.innerWidth < 981 && e.target.closest('a')) {
+      root.setAttribute('data-sidebar', 'closed');
+      localStorage.setItem('sidebarState', 'closed');
+    }
+  });
+  if (window.renderMathInElement) {
+    renderMathInElement(document.body, {
+      delimiters: [
+        {left: "$$", right: "$$", display: true},
+        {left: "$", right: "$", display: false}
+      ]
+    });
+  }
+})();
+</script>
+</body>
+</html>
