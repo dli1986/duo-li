@@ -1,0 +1,105 @@
+---
+title: "性能调优案例：Buddy Allocator 引入的 Page Fault 风暴"
+slug: "cpp-buddy-allocator-page-fault-case-study"
+category: "Systems Engineering"
+kind: "article"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "Performance"
+  - "Memory Management"
+summary: "一次真实性能回归的复盘：把默认的 glibc 分配器换成自定义 buddy allocator 后，一个排序场景的吞吐下降约 74%。用 perf/valgrind/kcachegrind 定位到根因是内存碎片化导致有效工作集膨胀、page fault 次数暴涨，而不是 CPU 指令本身变慢。"
+createdAt: "2026-09-23"
+---
+
+## 1. 背景：一次看似无害的分配器替换
+
+某个数据处理引擎里有一段排序热路径：先分配大量小对象（记录/key），随机访问、比较、排序，最后释放。为了减少 glibc `malloc`/`free` 在高并发下的锁竞争和碎片化，团队尝试引入一个自定义 **buddy allocator** 替换默认分配器，预期会提升吞吐。上线压测后发现：**同样的工作负载，替换分配器后整体运行时间从约 2.35 秒上升到约 4.1 秒，性能反而下降了约 74%。**
+
+## 2. 用于复现问题的简化基准
+
+```cpp
+class GlibcAllocator {
+public:
+    void* allocate(size_t size) { return std::malloc(size); }
+    void deallocate(void* ptr) { std::free(ptr); }
+};
+
+class BuddyAllocator {
+public:
+    explicit BuddyAllocator(size_t pool_size);
+
+    void* allocate(size_t size);
+    void deallocate(void* ptr);
+
+private:
+    // 按 2 的幂次划分内存块，分配时向上取整到最近的 2^k，
+    // 释放时尝试与相邻的 buddy 块合并。
+    std::vector<FreeList> free_lists_;
+    std::byte* pool_;
+    size_t pool_size_;
+};
+
+template <typename Allocator>
+class SortProcessor {
+public:
+    explicit SortProcessor(Allocator& allocator) : allocator_(allocator) {}
+
+    void InsertRecord(const Record& record);
+    void SortRecords();      // 对应原型中的 SortList
+    Record* FindRecord(const Key& key); // 对应原型中的 GetDataPointer / CompareRecords
+
+private:
+    Allocator& allocator_;
+    std::vector<Record*> records_;
+};
+
+void SimulateMemoryPressure(SortProcessor<BuddyAllocator>& processor, int record_count)
+{
+    for (int i = 0; i < record_count; ++i) {
+        processor.InsertRecord(MakeRandomRecord());
+    }
+    processor.SortRecords();
+}
+```
+
+> 注：原始复现代码里的具体函数名来自内部数据库引擎（如 `jbase_getdp`、`AddKey`、`CompareRecord`、`listsort`），这里替换为通用等价名称（`GetDataPointer`/`FindRecord`、`InsertRecord`、`CompareRecords`、`SortRecords`），不改变问题的技术本质——一个"插入大量小记录 + 随机访问比较 + 排序"的典型工作负载。
+
+## 3. 定位工具链
+
+- **`perf stat` / `perf record` + `perf report`**：先看整体 CPU 时间分布，确认瓶颈到底在用户态计算、系统调用，还是缺页处理路径。
+- **`perf record -e page-faults` / `/usr/bin/time -v`**：直接统计次要缺页（minor page fault）次数，这是本案例里最关键的一组指标。
+- **`valgrind --tool=massif`**：观察堆内存的实际占用曲线，判断是否存在异常的内存膨胀。
+- **`valgrind --tool=cachegrind` + `kcachegrind`**：可视化缓存命中率和内存访问模式，帮助判断"变慢"到底是计算密集还是内存访问密集导致。
+- **flamegraph**：把 `perf record` 的采样数据转成火焰图，快速看出耗时集中在哪个调用栈路径上，避免逐行读汇编。
+
+## 4. 关键发现：不是 CPU 变慢，是内存访问变"贵"了
+
+用 `perf stat` 对比两个版本，用户态和系统态 CPU 时间的比例出现了明显变化——buddy allocator 版本里，处理同样数据量时花在内核缺页处理路径上的时间占比大幅上升。用 `perf record -e page-faults` 统计后，两者的量级差异非常悬殊：
+
+| 指标 | glibc 分配器 | buddy allocator |
+| --- | --- | --- |
+| 总缺页次数（page faults） | 约 19,611 | 约 230,335 |
+| 实际占用内存页数 | 约 350 页 | 约 675 页 |
+| 峰值内存占用 | 约 1.4 MB | 约 2.7 MB |
+| 总运行时间 | 约 2.35 秒 | 约 4.1 秒 |
+
+缺页次数相差超过一个数量级，而峰值内存占用只是接近翻倍——这说明问题不是"分配了多离谱的内存"，而是**同样规模的数据，被分配器切分/摆放的方式导致有效工作集变得又大又不连续，触发了远超预期的缺页处理**。
+
+## 5. 根因：碎片化把"局部性"打散了
+
+Buddy allocator 按 2 的幂次对齐分配块，对于大小不规则的小记录（典型的排序场景 key/记录大小并不整齐地落在 2 的幂次上），会产生明显的**内部碎片**（分配到的块比实际需要的大）和**外部碎片**（可用空闲块分散、难以合并成大块）。碎片化带来两个连锁效应：
+
+1. **同样数量的逻辑数据，占用了更多物理页**——原本可能挤在 350 个页里的数据，被摊薄到 675 个页，直接导致工作集变大。
+2. **原本可能相邻的记录，被分配到相隔更远的内存页上**——排序过程中大量的随机访问（比较、交换）不再享有原本 glibc 分配器提供的连续/紧凑摆放带来的空间局部性,反而频繁跨页访问。跨页访问一旦超出已经驻留的物理页范围，就会触发缺页中断，由内核介入处理（哪怕是次要缺页，只是把页表项建立起来，也不是零成本的）。
+
+**核心结论**：这次性能回归的本质不是"buddy allocator 计算逻辑更慢"，而是**它改变了内存的物理布局，把原本紧凑、局部性良好的访问模式，变成了稀疏、频繁跨页的访问模式，缺页处理的开销远远超过了它在分配/释放路径上想要节省的那点开销。**
+
+## 6. 一般性的教训
+
+- **自定义分配器的目标必须和真实访问模式匹配**：buddy allocator 更适合大小相对规整、且合并/复用频繁的分配场景；对于大量大小不规则的小对象、且后续会有密集随机访问的场景，它反而可能因为碎片化牺牲局部性。
+- **不要只看"分配/释放本身快不快"**：分配器的选择会间接影响到后续所有访问这块内存的代码的 cache/TLB/page 行为，必须把"分配之后怎么用"也纳入评估。
+- **诊断链路要从系统层面开始，而不是先怀疑业务逻辑**：`perf stat` 的用户态/系统态时间比例、page fault 计数，往往比一开始就去看业务代码热点更快定位到这类问题。
+- **量化指标比直觉更可靠**：19,611 次和 230,335 次缺页之间超过 10 倍的差距，是判断"这确实是内存布局问题，不是玄学"的关键证据；没有这组数字，很容易把回归错误地归因到"新分配器实现效率低"这种模糊结论上。
+
+_Personal notes: to be added._

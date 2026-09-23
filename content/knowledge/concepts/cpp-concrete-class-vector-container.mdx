@@ -1,0 +1,105 @@
+---
+title: "C++ Concrete Class 设计：以 Vector 为例的 Container"
+slug: "cpp-concrete-class-vector-container"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "OOP"
+summary: "从 complex 这种简单值类型过渡到 Vector 这种管理一组元素/资源的 concrete class：representation 与 class invariant 的关系、member initializer list 的意义、size-based 与 initializer_list 两种构造方式的区别，以及 RAII 的基本思想。"
+createdAt: "2026-09-23"
+---
+
+## 1. Container 类型：管理一组元素的对象
+
+`complex` 这种简单值类型的对象数据直接存在对象内部；而 `Vector` 这种 container 的简化版本通常是：
+
+```cpp
+class Vector {
+public:
+    Vector(int s) : elem{new double[s]}, sz{s} {}
+
+    double& operator[](int i) { return elem[i]; }
+    int size() const { return sz; }
+
+private:
+    double* elem;
+    int sz;
+};
+```
+
+`Vector` 对象本身并不直接包含所有元素，对象内部只保存一个指针和一个 size，真正的一组元素在动态分配的内存中：
+
+```text
+Vector object
++----------------+
+| elem ----------|----> [ double ][ double ][ double ][ double ] ...
+| sz    = 4      |
++----------------+
+```
+
+这一节的重点是：**如何设计一个 concrete class，让它通过一个指针和一个 size 表示并管理一组元素。**
+
+## 2. representation 本身没有意义，class invariant 让它有意义
+
+单独看 `double* elem;`，它可能是 `nullptr`、野指针、指向一个 double、指向一组 double，或指向已经释放的内存——只有一个裸指针不能说明对象是什么。真正让 `elem` 有意义的是 class invariant：
+
+```text
+elem 指向一段包含 sz 个 double 的连续内存；
+sz 表示元素个数；
+对于 0 <= i < sz，elem[i] 是合法访问位置。
+```
+
+即：**representation + invariant = meaningful object state。**
+
+## 3. constructor 的核心任务：对象一出生就有意义
+
+```cpp
+Vector(int s) : elem{new double[s]}, sz{s} {}
+```
+
+构造函数不是随便给成员变量赋值，它的真正意义是**在构造完成时建立 class invariant**。执行完构造函数之后，`Vector` 对象必须处于合法状态——已经"有结构意义"，但不一定已经"有业务数据意义"。
+
+## 4. member initializer list
+
+```cpp
+Vector(int s) : elem{new double[s]}, sz{s} {}
+```
+
+`: elem{...}, sz{...}` 叫 member initializer list，作用是在进入构造函数函数体之前直接初始化成员变量。对比写成函数体内赋值（`elem = new double[s]; sz = s;`），后者是"先让成员进入某种默认状态，再赋值"；而 member initializer list 是"对象刚出生时，representation 就被设置到符合 invariant 的状态"。对于 `const int n;` 或 `int& ref;` 这类成员，member initializer list 是必须的（不能先默认初始化再赋值）。
+
+## 5. 两种构造语义：size-based vs. content-based
+
+`Vector(int s)` 表达"我要一个大小为 s 的 Vector"（size-based construction），不表示内容是什么。后续引入 `std::initializer_list` 是为了支持"有初始内容"的构造（content-based construction）：
+
+```cpp
+Vector(std::initializer_list<double> lst)
+    : elem{new double[lst.size()]}, sz{static_cast<int>(lst.size())}
+{
+    std::copy(lst.begin(), lst.end(), elem);
+}
+```
+
+两个构造函数是 overload，语义不同，但都必须建立同一个 class invariant——**不同 constructor 可以接受不同形式的输入，但每个 constructor 都必须保证对象构造完成后处于同一种合法状态。**
+
+## 6. 容易 miss 的点：`Vector v{4}` 的含义可能会变
+
+如果只有 `Vector(int s)`，`Vector v{4};` 通常表示"大小为 4 的 Vector"。但如果同时有 `Vector(std::initializer_list<double> lst)`，`Vector v{4};` 通常会**优先匹配 initializer_list 构造函数**，含义变成"1 个元素，值为 4"。这和标准库 `std::vector<int> a(10)`（10 个元素）vs `std::vector<int> b{10}`（1 个元素，值为 10）是同一个经典区别。
+
+## 7. "有意义"的两层：结构意义 vs. 数据意义
+
+- `Vector v(4);` 有**结构意义**：`v.elem` 指向有效内存，`v.sz == 4`，可以访问 `v[0]` 到 `v[3]`，但元素值不一定是业务数据。
+- `Vector v{1, 2, 3, 4};` 同时有**数据意义**：`v.size() == 4` 且 `v[0..3]` 就是 1,2,3,4。
+
+## 8. destructor 与 RAII
+
+`new double[s]` 分配了一段动态内存，意味着 `Vector` 拥有了一块资源；对象拥有资源，销毁时就应该释放资源，因此需要 destructor：
+
+```cpp
+~Vector() { delete[] elem; }
+```
+
+这体现了 RAII 的基本思想：**constructor acquires resource（构造函数获取资源），destructor releases resource（析构函数释放资源）**，即"对象生命周期 = 资源生命周期"。但只有 destructor 还不够——默认 copy 会直接复制指针，这个问题需要 copy constructor / copy assignment 来解决（见配套的 copy/move 笔记）。
+
+_Personal notes: to be added._

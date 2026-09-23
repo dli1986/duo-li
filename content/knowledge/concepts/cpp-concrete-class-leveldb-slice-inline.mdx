@@ -1,0 +1,68 @@
+---
+title: "Concrete Class 设计对照：LevelDB Slice 的 inline 与 operator=="
+slug: "cpp-concrete-class-leveldb-slice-inline"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "LevelDB"
+  - "OOP"
+summary: "对照《A Tour of C++》concrete class 设计思想与 LevelDB Slice 的真实实现：为什么 operator== 是非成员函数而 compare() 是成员函数、类内 inline 和头文件里的类外 inline 分别解决什么问题，以及 representation / invariant / abstraction / performance 四个维度如何在 Slice 里对应落地。"
+createdAt: "2026-09-23"
+---
+
+LevelDB 的 `Slice` 基本就是《A Tour of C++》里 concrete class 设计思想的工程化版本之一。它的头文件里把构造函数、`data()`、`size()`、`empty()`、`clear()`、`remove_prefix()` 等短函数直接定义在 class 内，同时把 `operator==`、`operator!=` 和 `Slice::compare` 作为 `inline` 定义放在头文件里。
+
+## 1. 类内 inline 与类外 inline
+
+- **类内定义的成员函数**：默认是 `inline` 候选。
+- **类外定义但写在头文件里的函数**：如果可能被多个 `.cc`/`.cpp` 同时包含，通常需要显式 `inline`。
+
+`inline` 既有"建议编译器展开"的性能含义，也有一个很重要的**链接含义**：允许同一个函数定义出现在多个 translation unit 中而不违反 ODR（One Definition Rule）。
+
+如果写成声明+定义分离（`.h` 只放声明，`.cc` 放定义），其他 `.cc` 文件通常只看到声明看不到函数体，编译器在普通编译模型下不容易 inline。所以：想跨 translation unit inline → 函数定义需要放在头文件 → 放在头文件会被多个 `.cc` 包含 → 需要 `inline` 避免多重定义链接错误。
+
+## 2. `operator==`：非成员函数，只依赖 public interface
+
+```cpp
+inline bool operator==(const Slice& x, const Slice& y) {
+  return ((x.size() == y.size()) &&
+          (memcmp(x.data(), y.data(), x.size()) == 0));
+}
+```
+
+它不直接操作 representation（`data_`/`size_`），而是通过 `size()` 和 `data()` 这两个 public interface 来实现——这正是《A Tour of C++》那句话的意思："Many useful operations do not require direct access to the representation."`operator==` 不需要成为成员函数，也不需要成为 `friend`，只依赖 `Slice` 对外公开的 abstraction。
+
+## 3. `Slice::compare` 仍然是成员函数
+
+```cpp
+inline int Slice::compare(const Slice& b) const {
+  ...
+}
+```
+
+虽然定义写在 class 外面，但函数名前有 `Slice::`，所以它仍然是 `Slice` 的成员函数。调用 `a.compare(b)` 概念上是 `Slice::compare(&a, b)`——`a` 是隐式的 `this`，`b` 是显式参数。它的定义位置在 class 外，但成员身份仍然属于 `Slice`，仍然有 `this`，仍然可以直接访问 private `data_`。
+
+## 4. 为什么 `operator==` 是非成员，而 `compare` 是成员？
+
+**`operator==`** 表达的是两个对象之间的**对称关系**（`x == y`），语义上没有明显的"主对象"和"从对象"，所以写成非成员的 `operator==(x, y)` 很自然，而且它只需要 public interface（`x.size()`、`x.data()`、`y.size()`、`y.data()`），不需要进入 class 内部。
+
+**`compare`** 更像"this object compares itself with another object"（`a.compare(b)`），语义上有一个主语 `a`，所以作为成员函数是合理的。另外 `compare` 的实现直接访问 `data_` 和 `size_`，可以少一层 accessor 调用（虽然 accessor 本身也可能被 inline 掉）。LevelDB 的 `Slice::compare` 用 `memcmp` 做三路比较，前缀相等时根据长度决定结果。
+
+## 5. `Slice` 和 concrete class 四要素的对应关系
+
+- **representation**：`const char* data_; size_t size_;`——一个指针 + 一个长度，非常直接。
+- **invariant**：`data_` 指向一段长度为 `size_` 的字节序列；如果 `size_ == 0`，`data_` 仍然保持为可用的非空指针（如 `""`）；`Slice` 不负责释放 `data_` 指向的内存。默认构造函数会让 `data_ = ""; size_ = 0;`，避免空 `Slice` 的 `data()` 返回野指针。
+- **abstraction**：对外用户只看到 `data()`/`size()`/`empty()`/`operator[]`/`remove_prefix()`/`ToString()`/`compare()`/`starts_with()`，不需要知道内部到底是 `const char* + size_t` 还是未来变成别的结构。
+- **performance**：`Slice` 是 LevelDB 里的基础类型，key/value 都会频繁通过它传递，所以必须极轻量——小函数 inline、non-owning（不复制底层字节）、用 `memcmp` 比较。这就是 concrete class 里"抽象但不牺牲效率"的典型设计。
+
+## 一句话总结
+
+> `Slice` 是一个非常典型的 concrete class：它用极简单的 private representation 表示一段非拥有型字节 view；类内放短小、频繁、直接操作 representation 的成员函数；类外放不需要破坏封装的操作，比如 `operator==`；但为了热路径性能，这些类外函数也定义在头文件并标记为 `inline`。
+
+可以记成：类内 inline = 操作自身状态，短小高频，常直接碰 representation；类外 inline = 不需要成为成员，但仍短小高频，需要头文件可见；`.cpp` 定义 = 较复杂，不在热路径，或希望隐藏实现细节。
+
+延伸方向：把 `Status` 和 `Iterator` 对比着看——`Slice` 更像 concrete value/view type，`Iterator` 更接近 interface/abstract class，这样能把 concrete class 和 abstract class 的分界看得更清楚。
+
+_Personal notes: to be added._

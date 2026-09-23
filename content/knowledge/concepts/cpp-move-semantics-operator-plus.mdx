@@ -1,0 +1,98 @@
+---
+title: "C++ Move 语义实战：operator+、返回值优化与测试方法"
+slug: "cpp-move-semantics-operator-plus"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "Memory Management"
+summary: "为什么 operator+ 应该返回 Vector 而不是 Vector&、链式相加为何会放大复制成本、move 到底优化了什么、NRVO/copy elision 与 move 与 copy 的三种区别，以及为什么不该手写 return std::move(res)。"
+createdAt: "2026-09-23"
+---
+
+## 1. `operator+` 的返回类型：`Vector` 还是 `Vector&`？
+
+```cpp
+Vector operator+(const Vector& a, const Vector& b)
+{
+    Vector res(a.size());
+    for (int i = 0; i != a.size(); ++i) res[i] = a[i] + b[i];
+    return res;
+}
+```
+
+`res` 是函数内部的局部对象，函数返回后局部对象的生命周期结束——如果返回类型写成 `Vector&`，返回的引用会绑定到一个已经销毁的局部对象，形成 dangling reference，之后任何使用都是未定义行为。返回类型必须是 `Vector`（按值返回），让调用方获得一个属于自己的、有效的 `Vector` 对象。
+
+## 2. 链式相加为什么会放大复制成本
+
+```cpp
+Vector x, y, z, w;
+w = x + y + z;
+```
+
+如果 `operator+` 每次都完整复制返回值，`x + y` 产生一个临时 `Vector`，这个临时对象再和 `z` 相加产生第二个临时 `Vector`，最后赋值给 `w`——如果每一步都发生一次完整的深拷贝（复制内部动态数组），链式表达式会产生多次完整数组复制，元素越多、链条越长，复制成本放大得越明显。这正是 move semantics 要解决的问题。
+
+## 3. move 到底优化了什么
+
+Move 优化的不是"要不要产生新对象"，而是**新对象获得数据的方式**：
+
+- **copy**：新对象申请自己的内存，把旧对象的数据逐个复制过去，旧对象保持不变、依然有效。
+- **move**：新对象"偷走"旧对象已经持有的内存（指针直接转移），旧对象被置成一个安全的空/合法状态（不再拥有那块内存），不需要重新分配和逐元素复制。
+
+对于内部管理动态数组的类型（如 `Vector`），move constructor 通常只是做几次指针/整数赋值（`elem = other.elem; sz = other.sz;`），再把 `other.elem` 置为 `nullptr`、`other.sz` 置为 `0`——远比重新 `new` 一块内存再逐元素复制便宜。
+
+## 4. 三种情况：copy elision（含 NRVO）、move、copy
+
+对于 `return res;`（`res` 是具名局部变量）：
+
+- **Copy elision / NRVO（Named Return Value Optimization）**：满足条件时，编译器可以直接在调用方的返回值存储位置构造 `res`，跳过任何 copy 或 move 构造函数调用，是最优的情况，也是现代编译器最常见的情况。
+- **Move**：如果编译器不做 NRVO（或规则不满足），但 `Vector` 定义了 move constructor，编译器会把 `res` 当作右值处理，调用 move constructor——避免了深拷贝，但仍有一次构造函数调用的开销。
+- **Copy**：如果没有 move constructor 可用，编译器退回调用 copy constructor，产生一次完整深拷贝——是三种情况里最昂贵的。
+
+**优先级大致是**：NRVO 优于 move 优于 copy，具体是否发生 NRVO 取决于编译器实现和优化设置，不能强行假设一定会发生。
+
+## 5. 为什么不该手写 `return std::move(res)`
+
+```cpp
+Vector operator+(const Vector& a, const Vector& b)
+{
+    Vector res(a.size());
+    // ...
+    return std::move(res); // 不推荐
+}
+```
+
+`res` 是函数的局部变量，在满足条件时编译器本来就有机会做 NRVO（比 move 更优）。手写 `std::move(res)` 会把 `res` 强制转换成右值表达式，这**恰好会阻止编译器做 NRVO**（因为返回表达式不再是"简单的局部变量名"，而是一个转换表达式），退化成"总是调用 move constructor"，反而比编译器本来可能做到的 NRVO 更差。**对于返回局部变量的情况，应该直接 `return res;`，把优化决策交给编译器**，只有在返回的是一个函数参数、或者返回类型和局部变量类型不同等 NRVO 不适用的场景，才需要考虑显式 `std::move`。
+
+## 6. 推荐的 `operator+` 设计：基于 `operator+=` 实现
+
+```cpp
+Vector& operator+=(Vector& a, const Vector& b)
+{
+    for (int i = 0; i != a.size(); ++i) a[i] += b[i];
+    return a;
+}
+
+Vector operator+(Vector a, const Vector& b) // 注意：a 按值传入
+{
+    a += b;
+    return a;
+}
+```
+
+`operator+` 按值接收第一个参数 `a`（调用方传入的实参会被复制或 move 构造出这个局部参数），函数内部直接在这个已经独立拥有的 `a` 上做 `+=` 原地修改，最后 `return a;`——`a` 是函数的具名局部对象（尽管它是参数），同样有机会被 NRVO 或至少 move 优化，同时避免了在函数体内再引入一个额外的 `res` 变量和重复的初始化逻辑。这种"以复合赋值运算符为基础实现二元运算符"的写法，是 C++ 里设计算术/关系运算符的常见惯用法。
+
+## 7. 一个直觉性的验证方法
+
+想验证某段代码到底触发了 copy 还是 move，可以在自定义类型的 copy constructor、move constructor、destructor 里各加一行打印：
+
+```cpp
+Vector(const Vector& other) { std::cout << "copy ctor\n"; /* ... */ }
+Vector(Vector&& other) noexcept { std::cout << "move ctor\n"; /* ... */ }
+~Vector() { std::cout << "dtor\n"; }
+```
+
+然后运行 `w = x + y + z;` 之类的表达式，观察输出顺序和次数——这是判断"编译器到底做了 NRVO、move、还是 copy"最直接、最不依赖猜测的方法，比单纯看汇编或者凭直觉判断更可靠。
+
+_Personal notes: to be added._

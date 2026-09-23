@@ -1,0 +1,89 @@
+---
+title: "static_cast vs dynamic_cast：CRTP 与运行时多态对照"
+slug: "cpp-static-cast-vs-dynamic-cast"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "OOP"
+summary: "static_cast 与 dynamic_cast 的对比总表，结合 CRTP 静态多态示例和运行时安全下行转换示例，说明两者在检查时机、底层机制、性能开销和安全性上的根本区别。"
+createdAt: "2026-09-23"
+---
+
+## 对比总表
+
+| 对比项 | `static_cast` | `dynamic_cast` |
+| --- | --- | --- |
+| 使用场景 | 类层级间**已知类型关系**的转换（上行/下行）；基本类型转换（如 `int → float`）；void*/枚举转换；模板编程和静态多态（如 CRTP） | 类层级间的**安全下行转换**；有虚函数的多态基类中，从基类指针/引用转换为派生类指针/引用 |
+| 本质目的 | 编译器检查类型关系，明确告诉编译器"我要这么转"，请你信任我（编译期机制） | 在运行时检查类型是否安全，避免错误类型转换（运行时机制） |
+| 底层实现机制 | 编译期展开类型转换路径，不检查 RTTI，可能强制指针 reinterpret | 利用 vtable 中的 RTTI，类型不匹配时返回 `nullptr`（指针）或抛异常（引用） |
+| 类比理解 | "我程序员拍胸脯告诉你这能转"（编译期认定） | "你先问一下对象自己是谁，再决定能不能转"（运行期判断） |
+| 是否支持 inline 优化 | 支持：编译期已知类型，编译器可做函数内联优化（如 CRTP 展开） | 不支持：需要 RTTI 和虚表跳转，无法内联 |
+| 是否支持 constexpr 优化 | 支持：模板 + constexpr 表达式可静态求值 | 不支持：依赖运行时，无法做 constexpr 推导 |
+| 典型场景 | CRTP 静态多态；模板中做类型变换；强制表达转换 `int → float`；现代元编程 | 多态容器中判断实际类型（`Base* → Derived*`）；工厂模式中判断派生类型；运行时接口访问（如事件分发） |
+| 转换失败时行为 | 无行为，直接转换，可能造成 UB（程序员需确保合法性） | 返回 `nullptr`（指针）或抛异常（引用） |
+| 安全性 | 相对不安全，但速度快，适合已知结构 | 安全，有运行时检查 |
+| 执行代价 | 零成本转换（如果转换合法） | 有运行时类型检查成本（RTTI + vtable 查找） |
+
+## `static_cast` in CRTP
+
+```cpp
+template<typename Derived>
+class PrinterBase {
+public:
+    void print() {
+        static_cast<Derived*>(this)->printImpl();
+    }
+};
+
+class Dog : public PrinterBase<Dog> {
+public:
+    void printImpl() { std::cout << "Dog\n"; }
+};
+
+class Cat : public PrinterBase<Cat> {
+public:
+    void printImpl() { std::cout << "Cat\n"; }
+};
+
+int main() {
+    Dog d;
+    Cat c;
+    d.print(); // 调用 Dog::printImpl()
+    c.print(); // 调用 Cat::printImpl()
+}
+```
+
+`static_cast<Derived*>(this)` 显式告诉编译器："我知道我是派生类，你可以直接展开成派生类的成员函数调用"。CRTP 的 trick 是：利用模板实例化机制，把"派生类行为"通过模板注入到"基类行为"中，靠 `static_cast` 打通。`static_cast` 应用到 template 中时，模板在编译期决定类型，加之编译期检查合法性，相当于保险机制保证静态多态的生成——**编译期绑定，编译器知晓类型路径，可优化。**
+
+## `dynamic_cast` in 多态场景
+
+```cpp
+struct Base {
+    virtual ~Base() = default;
+};
+
+struct Derived : public Base {
+    void bark() { std::cout << "Woof\n"; }
+};
+
+int main() {
+    Base* b = new Derived();
+
+    if (Derived* d = dynamic_cast<Derived*>(b)) {
+        d->bark();  // 安全使用
+    } else {
+        std::cout << "Wrong type!\n";
+    }
+}
+```
+
+这里做转换实际是运行时类型检查的作用：因为 `b` 定义时是 `Base*` 类型，需要判断它到底是不是真的指向继承类对象，这是一个保险机制，并没有别的作用——**运行时安全检测，避免非法下行转换。**
+
+## 记忆口诀
+
+> `static_cast`：我说了算 → 快但你要小心
+> `dynamic_cast`：你自己说 → 慢但有保障
+
+_Personal notes: to be added._

@@ -1,0 +1,134 @@
+---
+title: "C++ Class Invariant 深入理解：从自定义 Vec 到 LevelDB Status"
+slug: "cpp-class-invariant-vec-leveldb-status"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "LevelDB"
+  - "OOP"
+summary: "class invariant 不是抽象的书本概念，而是让一堆无语义的 raw pointer/bytes 组合成合法对象的那组必须始终成立的事实。以自定义 Vec 和 LevelDB Status 为例，说明 invariant 如何贯穿 constructor、public interface 边界和 destructor，以及它和单纯“正确操作指针”的区别。"
+createdAt: "2026-09-23"
+---
+
+> **representation 本身只是 bytes / pointers / fields；invariant 是让这些 fields 组合起来成为"一个合法对象"的那组必须始终成立的事实。**
+
+正确的指针操作只是 preserve invariant 的手段之一，不是 invariant 本身——invariant 不是"内部操作要用正确的指针操作"这么局部，而是"这个对象在任何 public interface 边界上，都必须处于一种内部自洽、可继续被安全使用的状态"。
+
+## 1. 用自定义 vector 把感觉落地
+
+```cpp
+class Vec {
+public:
+    Vec();
+    ~Vec();
+
+    void push_back(int x);
+    int& operator[](size_t i);
+    size_t size() const;
+
+private:
+    int* elem;
+    size_t sz;
+    size_t cap;
+};
+```
+
+representation 是 `elem`、`sz`、`cap` 三个字段，但它们本身没有意义，可以变成很多不合理的组合（`elem = nullptr, sz = 10, cap = 0`；`elem` 是 dangling pointer 但 `sz = 3`；`sz = 100` 但 `cap = 3`）。所以需要 invariant，比如：
+
+```text
+1. 0 <= sz <= cap
+2. 如果 cap == 0，那么 elem == nullptr
+3. 如果 cap > 0，那么 elem 指向一块能容纳 cap 个 int 的有效内存
+4. elem[0, sz) 是已经构造好的元素
+5. elem[sz, cap) 是可用但尚未构造/逻辑上未使用的空间
+```
+
+这才是对象真正"活着"的条件。`elem[sz] = x; ++sz;` 这类内部操作之所以正确，不是因为"指针语法正确"，而是因为执行之前依赖了 invariant（`sz < cap`，`elem` 指向有效内存，`elem[sz]` 是可写位置），执行之后还要保证 invariant 仍然成立。**internal operation 不只是正确操作 pointer，它是在某个 invariant 成立的前提下执行，并在执行后恢复/保持 invariant。**
+
+## 2. public interface 边界：对象什么时候必须"干净"
+
+一个对象的 invariant 不一定在每一行代码之后都成立。比如 `push_back` 内部：
+
+```cpp
+void push_back(int x) {
+    if (sz == cap) {
+        reserve(cap == 0 ? 1 : cap * 2);
+    }
+    elem[sz] = x;
+    ++sz;
+}
+```
+
+如果 `reserve()` 要重新分配内存，中间过程可能经历一些"transition state"。但要保证：**在 public function 入口，this 对象满足 invariant；在 public function 返回时，this 对象仍然满足 invariant；如果抛异常，对象最好仍然满足 invariant。**
+
+- constructor 是 first place，因为它的任务就是把一堆 raw representation 初始化成第一个合法状态。
+- destructor 是最后一个 place，在 invariant 还可信的时候安全释放 representation 拥有的资源。
+- public interface 是对象和外界的边界：外界不需要知道 `elem`/`sz`/`cap`，但可以相信 vector 是一个合法 vector。
+
+## 3. "meaningful pointer" 与 invariant 的区别
+
+一个 `char*` 的"意义"不是它自己决定的，而是由 surrounding invariant 决定的。例如 `char* state_;` 可以有很多含义（`nullptr` 表示 OK / 非 `nullptr` 表示 error buffer / `state_[0..4)` 存长度 / `state_[4..]` 存消息……），只看 `char*`，编译器和人都不知道这些——这个 pointer 的意义来自 class 的 invariant。工程上，invariant 的价值是：**把 C/C++ 这种无语义的 raw memory/pointer，约束成有领域意义的 object state。**
+
+## 4. LevelDB `Status` 是很好的例子
+
+```cpp
+class Status {
+private:
+    const char* state_;
+};
+```
+
+`state_` 的含义不是"一个字符指针"这么简单：`state_ == nullptr` 表示 `Status::OK()`；`state_ != nullptr` 时指向一段 heap memory，里面编码了错误码和错误消息。invariant 大致是：
+
+```text
+1. state_ == nullptr 表示 Status::OK()
+2. state_ != nullptr 时，它必须指向 Status 自己管理的一段有效内存
+3. 这段内存的 layout 必须符合 Status 约定
+4. copy/move/destructor 必须正确管理这段内存的 ownership
+5. public methods 如 ok(), ToString(), code() 都依赖这个 layout
+```
+
+`const char* state_;` 本身非常弱——它既可能指向 string literal，也可能指向 heap，也可能是 dangling pointer。但 `Status` 通过 invariant 给它赋予了强语义（`nullptr => success`，`valid buffer => failure with encoded data`），所以 `ok()` 可以直接依赖 invariant：
+
+```cpp
+bool ok() const { return state_ == nullptr; }
+```
+
+`ToString()` 可以依赖"如果 `state_ != nullptr`，它一定是符合预期格式的 buffer"；destructor 可以依赖"如果 `state_ != nullptr`，它一定是可以释放的内存"。**`ok()`、`ToString()`、destructor 并不是每次都重新证明 `state_` 合法，它们依赖 class invariant**——这就是 invariant 的工程价值：让局部代码可以简单，因为全局状态被 class 约束住了。
+
+## 5. 更准确的理解
+
+> invariant 是 representation 的合法状态集合；每个 constructor 负责建立这个合法状态；每个 public operation 可以假设它开始时处于合法状态，并必须在结束时保持合法状态；每个 private/internal operation 要么只能在合法状态下被调用，要么清楚标注它会临时破坏哪些条件，并负责恢复。
+
+这比"正确操作指针"更工程化，因为有时候指针操作本身是正确的，但 invariant 还是坏了。例如：
+
+```cpp
+void bad_push_back(int x) {
+    elem[sz] = x;
+    // 忘了 ++sz
+}
+```
+
+指针操作可能完全合法，但 vector 的抽象状态错了——`v.push_back(42); v.size();` 还是旧值，representation 没有崩，但 abstraction 坏了。再比如 `reserve` 里忘了更新 `cap`，内存也许没坏，但 `cap` 和 `elem` 的关系坏了，之后 `push_back()` 会基于错误的 invariant 做决策。所以：
+
+```text
+invariant = memory safety + ownership correctness + logical consistency + abstraction consistency
+```
+
+## 6. 更工程化的判断方法
+
+看 legacy 项目、LevelDB 或自己写的类时，可以问这几个问题：
+
+1. **这个 class 的 representation 是什么？**（如 `char* data_; size_t size_; size_t capacity_;`）
+2. **哪些状态是非法的？**（如 `size_ > capacity_`；`data_ == nullptr` 但 `capacity_ > 0`；`data_` 指向不是本对象拥有的内存但析构时 `delete[]`）
+3. **public function 依赖了哪些前提？**（如 `operator[]` 依赖 `data_ valid` 是 class invariant，`i < size_` 是 caller precondition）
+4. **public function 修改后恢复了哪些事实？**（如 `push_back` 后必须保证 `size_` 增加、`capacity_` 足够、`data_` 仍然有效、已有元素不丢）
+5. **destructor 能否无条件相信 representation？**（如 `~Vec() { delete[] elem; }` 依赖"`elem` 要么 `nullptr`，要么是可 `delete[]` 的指针"，这也是 invariant 的一部分）
+
+## 一个更短的心智模型
+
+> Representation 是对象的身体。Invariant 是身体必须满足的生命体征。Abstraction 是外界看到的行为和承诺。Public interface 是外界操作抽象的入口。Private implementation 是在不破坏生命体征的前提下摆弄身体。
+
+_Personal notes: to be added._

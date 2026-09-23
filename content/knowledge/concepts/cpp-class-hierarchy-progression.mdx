@@ -1,0 +1,103 @@
+---
+title: "C++ Class Hierarchy：从 Concrete Class 到多态设计的递进"
+slug: "cpp-class-hierarchy-progression"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "OOP"
+summary: "《A Tour of C++》第 4 章建立的一条完整设计路线：从 concrete class 的 representation/invariant，到 abstract class 的接口契约，到 virtual function 的运行时分派，再到 class hierarchy 组织一组相关类型；附一份可反复使用的代码阅读 checklist，以及 explicit override 的价值。"
+createdAt: "2026-09-23"
+---
+
+## 总体递进关系
+
+《A Tour of C++》第 4 章不是孤立介绍几个语法点，而是在建立一条关于**抽象、表示、运行时多态、生命周期管理**的设计路线：
+
+```text
+Concrete Class
+    ↓
+Representation + Invariant
+    ↓
+Abstract Class
+    ↓
+Interface / Contract
+    ↓
+Virtual Function
+    ↓
+Runtime Dispatch
+    ↓
+Class Hierarchy
+    ↓
+Polymorphism + Ownership + Lifetime
+```
+
+也可以换成阅读代码时的一串问题：用户如何使用这个类？内部如何表示状态？这些状态如何保持合法？类是否只暴露协议而隐藏实现？调用是否需要在运行时落到不同实现？多个相关类型如何组织成一组？对象生命周期和资源释放谁负责？
+
+## 1. Concrete Class：表示一个真实对象
+
+Concrete class 的核心不是"它不是抽象类"，而是**它拥有自己的 representation，并负责维护 representation invariant**。构造函数的作用不只是"初始化成员变量"，而是"建立对象的合法状态"；析构函数的作用不只是"清理一下"，而是"释放对象拥有的资源，结束对象生命周期"。成员函数执行过程中，representation 可以短暂进入中间状态，但在 public API 返回给用户之前应该重新恢复 invariant。
+
+阅读 concrete class 时可以问：这个类代表什么概念？内部有哪些 data members？这些 data members 共同表达什么状态？什么状态合法/非法？构造函数何时建立 invariant？析构函数释放了哪些资源？每个 public API 返回后 invariant 是否仍然成立？
+
+## 2. Abstract Class：定义一种角色或协议
+
+Abstract class 的重点不是"有纯虚函数"这么表层，而是**它定义了一种 role / protocol / capability**：
+
+```cpp
+class Comparator {
+public:
+    virtual ~Comparator() = default;
+    virtual int Compare(const Slice& a, const Slice& b) const = 0;
+    virtual const char* Name() const = 0;
+};
+```
+
+用户不关心具体对象到底是 `BytewiseComparator` 还是 `ReverseComparator`，只知道"只要你是 `Comparator`，我就可以调用 `Compare()` 和 `Name()`"。调用方（如 `PrintOrder(const Comparator& cmp, ...)`）不需要知道 `cmp` 的具体类型，依赖的是 `Comparator` 的 abstract contract。
+
+**Abstract class 也有 invariant**：`Comparator::Compare()` 的函数签名背后隐含的 contract 可能包括——比较结果必须稳定；如果 a < b，之后不应该无理由变成 a > b；比较关系应该满足传递性；同一个 Comparator 的 `Name()` 应该反映其比较规则；如果比较器用于持久化数据结构，语义变化可能导致旧数据不可读或顺序错误。读 abstract class 时不能只看函数签名，还要问：这个接口背后承诺了什么语义？derived class 必须满足哪些没有写进类型系统的规则？这些规则被破坏会导致什么系统级问题？
+
+## 3. Virtual Function：连接 interface 和 implementation
+
+```cpp
+class Shape {
+public:
+    virtual ~Shape() = default;
+    virtual void draw() const = 0;
+};
+
+class Circle : public Shape {
+public:
+    void draw() const override { std::cout << "draw circle\n"; }
+};
+
+void DrawOne(const Shape& s) { s.draw(); }
+```
+
+要区分 **static type**（编译器在源码中看到的类型）和 **dynamic type**（对象在运行时真正的类型）。`Shape* p = new Circle{};` 中，`p` 的 static type 是 `Shape*`，指向对象的 dynamic type 是 `Circle`，因此 `p->draw()` 调用 `Circle::draw()`。
+
+### Explicit Overriding
+
+`override` 的作用不是让代码更好看，而是把"我想覆盖 base class virtual function"这个意图交给编译器检查。如果 derived class 误写成 `void draw()`（忘了 `const`），没有 `override` 时程序员可能误以为自己覆盖了 `Shape::draw() const`；写了 `override` 后编译器会立刻报错。阅读 C++ 代码时看到 derived class 中的 virtual-looking 函数，要主动问：它真的 override 了 base function 吗？参数类型、const、引用限定符是否一致？返回类型是否允许协变？是否应该显式写 `override`？
+
+## 4. Class Hierarchy：组织一组相关类型
+
+Class hierarchy 的意义不是"使用继承语法"，而是**通过 base class 表达共同 interface，通过 derived class 表达不同 representation 和 behavior，通过 virtual dispatch 在运行时选择具体实现**：
+
+```cpp
+void DrawAll(const std::vector<std::unique_ptr<Shape>>& shapes)
+{
+    for (const auto& s : shapes) {
+        s->draw();
+    }
+}
+```
+
+调用方不需要知道容器里到底是 `Circle`、`Triangle` 还是其他 `Shape`——这就是 class hierarchy 的主要设计收益：**高层代码依赖抽象接口，低层代码提供具体实现。**
+
+### Benefits from Hierarchies
+
+Class hierarchy 的最大收益不是"复用代码"，而是**稳定依赖方向**：高层逻辑依赖 base interface，具体实现通过 derived class 提供。例如 `RotateAll(std::vector<std::unique_ptr<Shape>>& shapes, int angle)` 中，调用方只依赖 `Shape::rotate()`，不关心具体是哪个派生类。
+
+_Personal notes: to be added._

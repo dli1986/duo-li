@@ -1,0 +1,130 @@
+---
+title: "从 RAII 到 Ownership Graph：资源管理与 LevelDB 工程实践"
+slug: "cpp-raii-ownership-graph-leveldb"
+category: "Systems Engineering"
+kind: "article"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "LevelDB"
+  - "Memory Management"
+  - "RAII"
+summary: "RAII 的核心原则、可复制性判断标准（std::thread 不可复制 vs 大 std::vector 可复制但昂贵）、两层资源组合（FileDescriptor 与 DatabaseFile）示例，以及 Close() 与析构函数应该如何分工处理错误。"
+createdAt: "2026-09-23"
+---
+
+## 1. RAII 的核心原则
+
+**Resource Acquisition Is Initialization**：把资源的生命周期绑定到对象的生命周期。构造函数负责获取资源（打开文件、分配内存、加锁等），析构函数负责释放资源，无论函数正常返回还是异常提前退出，只要对象存在于当前作用域，资源就会被自动释放。
+
+```cpp
+class FileHandle {
+public:
+    explicit FileHandle(const std::string& path)
+        : fp_(std::fopen(path.c_str(), "rb")) {}
+
+    ~FileHandle() {
+        if (fp_) std::fclose(fp_);
+    }
+
+private:
+    std::FILE* fp_;
+};
+```
+
+RAII 把"我获取了这个资源，我就必须记得释放它"这种人工纪律，转换成"对象生命周期结束会自动触发释放"的编译器保证。
+
+## 2. 可复制性判断：不是能不能复制，而是复制是否有意义
+
+`std::thread` 不可复制，因为一个 `std::thread` 对象拥有一个真实的操作系统线程，"复制一个线程"在语义上没有意义——线程要么被 join，要么被 detach，不能有两个对象同时代表"同一条底层线程"的所有权。所以 `std::thread` 只支持 move（转移所有权），不支持 copy。
+
+大的 `std::vector` 在语法上**可以复制**，但复制代价可能很高（深拷贝整个底层数组）。这类对象的问题不是"能不能复制"，而是"复制是否符合工程意图"——如果只是想传递/转移数据的所有权，应该用 `std::move`；如果确实需要独立的两份数据，才应该复制。
+
+**判断标准**：这个对象代表的是一份"可以被安全复制的数据"，还是一份"独占的、有物理意义的资源"（线程、文件描述符、锁、socket）？前者复制是自然的（哪怕昂贵），后者复制在语义上通常是错误的，应该禁止复制、只允许 move，或者禁止两者、只允许通过引用/指针访问。
+
+## 3. 两层资源组合：`FileDescriptor` + `DatabaseFile`
+
+真实系统中，资源管理经常是分层的——底层资源类只管理最原始的系统句柄，上层类通过组合（而不是继承）复用底层资源类的 RAII 保证，同时叠加自己的领域语义：
+
+```cpp
+class FileDescriptor {
+public:
+    explicit FileDescriptor(int fd) : fd_(fd) {}
+
+    FileDescriptor(const FileDescriptor&) = delete;
+    FileDescriptor& operator=(const FileDescriptor&) = delete;
+
+    FileDescriptor(FileDescriptor&& other) noexcept : fd_(other.fd_) {
+        other.fd_ = -1;
+    }
+
+    ~FileDescriptor() {
+        if (fd_ >= 0) ::close(fd_);
+    }
+
+    int get() const { return fd_; }
+
+private:
+    int fd_;
+};
+
+class DatabaseFile {
+public:
+    explicit DatabaseFile(const std::string& path)
+        : fd_(::open(path.c_str(), O_RDWR)) {}
+
+    Status Read(void* buf, size_t n) {
+        // 使用 fd_.get() 做底层系统调用
+        return Status::OK();
+    }
+
+private:
+    FileDescriptor fd_;
+};
+```
+
+`FileDescriptor` 只负责一件事：拥有一个 OS 文件描述符，保证它被正确 `close()`，禁止复制（复制一个 fd 的所有权没有意义），只允许 move（转移所有权，源对象的 `fd_` 置为无效值 `-1` 防止重复 `close()`）。`DatabaseFile` 组合 `FileDescriptor` 作为成员，自动获得了"文件描述符一定会被关闭"的保证，不需要自己写析构函数来管理 `fd_`，只需要专注于数据库文件相关的业务逻辑（读、写、格式解析）。
+
+**这就是 ownership graph 的直觉**：每一层对象都对它直接持有的资源负责，上层对象通过组合下层对象来自动获得下层的生命周期保证，不需要每一层都重新发明资源管理逻辑。
+
+```text
+DatabaseFile
+    owns
+    FileDescriptor
+        owns
+        raw OS file descriptor (int fd)
+```
+
+## 4. `Close()` 与析构函数的分工
+
+析构函数不能返回错误、不能安全地抛出异常（析构函数抛异常在栈展开过程中可能导致 `std::terminate`），但关闭文件、flush 缓冲区等操作在真实系统里经常会失败（磁盘满、IO 错误、网络中断）。因此很多资源类会同时提供一个显式的 `Close()`/`Finish()` 方法：
+
+```cpp
+class DatabaseFile {
+public:
+    Status Close() {
+        if (closed_) return Status::OK();
+        Status s = FlushAndSync();
+        closed_ = true;
+        return s;
+    }
+
+    ~DatabaseFile() {
+        if (!closed_) {
+            // 尽力而为地清理，但不能传播错误
+            FlushAndSync();
+        }
+    }
+
+private:
+    bool closed_ = false;
+};
+```
+
+**分工原则**：`Close()` 是"正常路径"，允许调用方检查返回的 `Status`，处理刷盘失败等错误；析构函数是"保底路径"，在调用方忘记显式 `Close()`，或者在异常/提前返回路径上，仍然尽力做资源清理，但不能也不应该向外传播错误——它只是安全网，不是错误处理的主战场。这也是为什么很多要求关注错误处理的库（包括 LevelDB 风格的代码）都建议：**资源使用方应该显式调用 `Close()` 并检查返回值，而不是依赖析构函数默默"尽力而为"。**
+
+## 一句话总结
+
+> RAII 把资源生命周期绑定到对象生命周期；可复制性应该由"复制是否有意义"决定，而不是"语法上能不能复制"；复杂系统中的资源管理通常是分层组合，每层只负责自己直接持有的资源；`Close()` 负责可检查的正常释放路径，析构函数负责兜底但不传播错误的保底路径。
+
+_Personal notes: to be added._

@@ -1,0 +1,126 @@
+---
+title: "C++ = default 与 explicit：LevelDB Slice 的拷贝语义与生命周期"
+slug: "cpp-default-explicit-leveldb-slice"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "LevelDB"
+  - "Memory Management"
+summary: "结合 LevelDB Slice 理解 = default 的准确含义（逐成员操作，不等于浅拷贝）、显式声明 copy operations 为什么会抑制隐式 move operations、explicit 如何阻止不安全的隐式转换，以及 non-owning view 最大的工程风险——dangling pointer。"
+createdAt: "2026-09-23"
+---
+
+## 1. 从 `Slice` 的类型意图出发
+
+`Slice` 的核心 representation 是 `const char* data_; size_t size_;`——这两个成员表明 `Slice` 自己不拥有字符数据，`data_` 只是借用并观察外部存储，`size_` 表示从 `data_` 开始有多少个有效字节，使用者必须保证底层数据在 `Slice` 使用期间仍然有效。可以把 `Slice` 理解成一个 **non-owning view（非拥有型视图）**——它的复制语义不是复制底层字符串，而是复制"观察关系"（复制指针值和长度，不是"移动"，这里容易和 C++ move semantics 混淆）。
+
+合理的 class invariant：`data_` 指向一段在 `Slice` 使用期间仍然有效的外部存储；`size_` 表示从 `data_` 开始可以观察的有效字节数；`Slice` 不拥有并且不释放这段存储。空 `Slice` 的 invariant 由 `Slice() : data_(""), size_(0) {}` 保证——不能仅仅写成 `Slice() = default;`，因为 `const char*` 和 `size_t` 是基本类型成员，若没有成员默认初始化器，默认构造未必会把它们初始化成安全值（现代写法可以用成员默认初始化器 `const char* data_ = ""; size_t size_ = 0;`，这样 `Slice() = default` 才能得到正确的默认状态）。
+
+## 2. constructor、copy constructor 与 copy assignment 的判断方法
+
+最实用的问题：**左侧对象是在这一行被创建，还是在这一行之前已经存在？**
+
+```cpp
+Slice a("hello");   // direct initialization，调用 Slice(const char* s)
+Slice b = a;        // 创建新对象 b，调用 copy constructor（不是 copy assignment）
+Slice c(a);         // 同样是创建，调用 copy constructor
+Slice d{a};          // direct-list initialization，同样调用 copy constructor
+
+Slice x("hello");
+Slice y("world");
+x = y;              // x 已经存在，调用 copy assignment operator
+```
+
+简单总结：**创建新对象 → constructor；修改已有对象 → assignment operator。**
+
+## 3. `= default` 的准确含义
+
+```cpp
+// Intentionally copyable.
+Slice(const Slice&) = default;
+Slice& operator=(const Slice&) = default;
+```
+
+准确表达的是："这个类型有意支持复制，而且编译器生成的逐成员操作正是这个类型需要的复制语义。"`= default` 不是简单表示"省略实现"，也不是笼统地"要求浅拷贝"——它要求编译器依照语言规则生成该特殊成员函数，执行 **member-wise operation（逐成员操作）**。对 `Slice` 来说，由于成员正好是 `const char* data_; size_t size_;`，逐成员复制最终表现为浅拷贝：复制地址和长度，不分配 free-store memory，也不复制或释放底层字符数据。
+
+**不要把 `= default` 一概理解成浅拷贝**：假如成员是 `std::string name_;`，编译器会逐成员复制 `name_`，也就是调用 `std::string` 自己的 copy constructor，`std::string` 管理的字符串值也会被复制。所以：`= default` → 逐成员操作；逐成员操作是否表现为浅拷贝，取决于成员类型自身的复制语义。在 `Slice` 中表现为浅拷贝，是由其 representation 决定的，不能以偏概全。
+
+`= default` 也有双向价值：设计者告诉编译器"逐成员行为就是我的意图"；编译器反过来验证"你的 representation 是否真的支持这种操作"——如果某个成员不支持相应操作，显式 defaulted 的函数可能被定义为 deleted。
+
+## 4. 显式声明会抑制哪些隐式声明
+
+C++ 的 special member functions 包括：default constructor、copy constructor、copy assignment、move constructor、move assignment、destructor。关键区别是：`Slice(const Slice&) = default;` 虽然函数体由编译器生成，但这个函数仍然是 **user-declared（用户显式声明的）**，而不是 implicit declaration。
+
+在 `Slice` 中，显式声明 copy operations 会**抑制编译器隐式声明 move constructor 和 move assignment**。但不能扩大成"只要任何地方出现一个 `= default`，其他所有特殊成员函数都不会生成"——正确理解是：某一种 special member function 被 user-declared 后，会依照 C++ 的特定规则影响其他 special member functions 的隐式声明，不同声明的影响并不完全相同。
+
+对 `Slice` 来说，缺少专门的 move operations 通常不是工程问题：复制一个指针和一个长度已经非常便宜，而且 `Slice` 没有资源所有权需要转移。即使没有 move constructor，`const Slice&` 仍可绑定右值，copy constructor 在需要时可作为后备；实际表达式还可能受 copy elision 影响。
+
+## 5. 引用成员：用"借用"理解 copy constructor 与 copy assignment
+
+```cpp
+class Ref {
+public:
+    explicit Ref(int& value) : value_(value) {}
+    Ref(const Ref&) = default;
+    Ref& operator=(const Ref&) = default; // 会被定义为 deleted
+
+private:
+    int& value_;
+};
+```
+
+`Ref z(x);` 中 `z` 是新对象，引用成员可以在构造时第一次绑定，默认 copy constructor 通常可行。但 `y = x;` 中 `y.value_` 已经绑定到别的对象，C++ 引用一旦绑定就不能重新绑定，因此默认逐成员 assignment 无法实现"让引用成员改借另一个对象"，编译器会把默认 copy assignment 定义为 deleted。设计者可以手写 `operator=`（例如把被引用对象的值赋过去），但那会表达完全不同的语义——是否合理必须根据业务语义决定。这说明：编译器说 defaulted copy assignment 被删除，不仅是语法障碍，也在迫使设计者回答"这个类型的 assignment 到底应该表示什么"。
+
+## 6. `explicit`：要求调用者明确表达转换意图
+
+`explicit` 的核心不是"representation 中包含指针或引用所以必须加"，而是：**从参数类型到 class type 的转换，在业务语义上是否自然、安全、低成本且没有歧义？**
+
+```cpp
+class UserId {
+public:
+    explicit UserId(int value) : value_(value) {}
+private:
+    int value_;
+};
+
+void delete_user(UserId id);
+
+delete_user(42);          // 编译错误：42 的业务含义不明确
+delete_user(UserId{42});  // 正确：调用者明确表达这是一个 UserId
+```
+
+`explicit` 主要在编译期阻止不希望发生的隐式转换，减少接口误用，但不意味着原代码一定会产生运行时崩溃。
+
+**LevelDB `Slice` 为什么允许隐式转换**：它的构造函数没有标记 `explicit`（`Slice(const std::string& s); Slice(const char* s);`），允许 `Slice s1 = some_string; Slice s2 = "hello";`。从 API 设计角度，`const char*` 和 `std::string` 都可以自然地表示一段字节序列，而 `Slice` 正是一段字节序列的 view，因此允许这种转换可让 `db->Put(options, "key", "value");` 这样的写法直接工作，而不必总是显式 `Slice("key")`。这是可用性与类型严格性之间的有意取舍——但 `explicit` 只控制转换语法，**不能解决 non-owning view 的生命周期问题**（见下一节）。
+
+## 7. copy initialization 与 direct initialization
+
+非 `explicit` 构造函数下，`Slice s2 = "hello";`（copy initialization）、`Slice s3("hello");`（direct initialization）、`Slice s4{"hello"};`（direct-list initialization）三者都会选择 `Slice(const char*)`——`=` 出现不意味着调用 copy constructor，右侧不是 `Slice`，而是通过 converting constructor 直接构造。如果改成 `explicit Slice(const char* s);`，则 `Slice s2 = "hello";` 会编译错误（copy initialization 不考虑 explicit constructor），而 `s3`/`s4` 仍然正确。
+
+## 8. `Slice` 最大的工程风险：dangling view
+
+`Slice` 自身不拥有数据，因此最大的风险不是 double free，也不是浅拷贝本身，而是：**`Slice` 活得比底层存储更久，导致 `data_` 成为 dangling pointer。**
+
+```cpp
+Slice s = std::string("hello");
+//                              ^ 临时 std::string 在这里销毁
+// s.data_ 从此悬空
+std::cout << s.data(); // 未定义行为风险
+```
+
+`const std::string&` 可以绑定右值临时对象，构造函数把临时字符串的 `data()` 和 `size()` 保存到 `Slice`，但临时 `std::string` 在当前 **full expression（完整表达式）** 结束时（分号处）就销毁了。"测试运行成功"不能证明安全——悬空指针指向的旧内存不保证立刻被覆盖或回收，程序可能仍然打印出旧内容，这只代表当前编译器/优化级别/内存布局/这一次运行碰巧保留了旧数据，不能证明代码合法。未定义行为的典型特点：可能看起来正常，可能在优化构建中出现不同结果，可能在加入一行无关代码后改变行为，可能崩溃也可能长期不崩溃。
+
+安全一些的用法：
+
+```cpp
+std::string storage("stringtest");
+Slice view(storage);
+
+std::cout.write(view.data(), static_cast<std::streamsize>(view.size()));
+```
+
+只要 `storage` 的生命周期覆盖 `view` 的使用范围，`view` 才保持有效。
+
+_Personal notes: to be added._

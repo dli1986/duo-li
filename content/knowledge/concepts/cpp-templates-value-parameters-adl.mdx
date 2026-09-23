@@ -1,0 +1,111 @@
+---
+title: "C++ 模板深入：类型参数、Value Parameter 与 ADL"
+slug: "cpp-templates-value-parameters-adl"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "Templates"
+summary: "从一个简单的模板容器出发，梳理 type template parameter 与 non-type/value template parameter 的区别、const 重载对、range-based-for 与 ADL 的 begin/end 机制，以及几个容易踩坑的细节：指针算术、end() 副作用、new T[] 默认初始化、Rule of Three/Five、size 类型选择。"
+createdAt: "2026-09-23"
+---
+
+## 1. Type template parameter：让容器与元素类型解耦
+
+```cpp
+template<typename T>
+class Vector {
+public:
+    T& operator[](int i) { return elem[i]; }
+    const T& operator[](int i) const { return elem[i]; }
+
+private:
+    T* elem;
+    int sz;
+};
+```
+
+`template<typename T>` 让 `Vector` 不绑定到具体元素类型——`Vector<double>`、`Vector<std::string>`、`Vector<MyClass>` 共享同一份模板定义，编译器在实例化时为每个具体类型生成对应的代码。这是模板最基本的价值：**把"容器的结构和行为"与"元素的具体类型"解耦**。
+
+## 2. const 与 non-const `operator[]` 成对出现
+
+```cpp
+T& operator[](int i) { return elem[i]; }
+const T& operator[](int i) const { return elem[i]; }
+```
+
+如果 `Vector` 对象本身是 non-const，`v[i]` 应该能读也能写，所以需要返回 `T&`；如果 `Vector` 对象是 const（例如通过 `const Vector<T>&` 参数传入的对象），只应该允许读，不允许通过 `operator[]` 修改内部元素，所以需要一个 `const` 成员函数版本，返回 `const T&`。编译器会根据调用方对象是否为 const，自动选择匹配的重载版本——**这一对重载是"让只读访问路径显式存在"的标准写法**，而不是可有可无的样板代码。
+
+## 3. Type parameter vs. non-type（value）parameter
+
+```cpp
+template<typename T, int N>
+class Buffer {
+public:
+    constexpr int size() const { return N; }
+
+private:
+    T data[N];
+};
+```
+
+`typename T` 是 type template parameter，接受的是一个类型；`int N` 是 non-type template parameter（也叫 value template parameter），接受的是一个编译期常量值。两者的关键区别：**type parameter 让编译器知道"元素是什么类型"；value parameter 让编译器知道"某个数量/尺寸/配置在编译期就已经固定"。** `N` 必须是编译期常量表达式，不能是运行期变量——这也是它和构造函数参数（如 `Vector(int s)`）的本质区别：构造函数参数在运行期才确定值，value template parameter 在编译期就已经确定。
+
+## 4. 暴露 `value_type` 与 `constexpr`：为什么要把内部信息"说出来"
+
+```cpp
+template<typename T, int N>
+class Buffer {
+public:
+    using value_type = T;
+    static constexpr int size() { return N; }
+    // ...
+};
+```
+
+暴露 `value_type` 让泛型代码（其他模板函数、标准库风格的算法）可以在不知道具体 `T` 是什么的情况下，通过 `Buffer<T,N>::value_type` 获取元素类型——这是让类型对"模板生态"可组合的常见约定（标准库容器普遍这样做）。把 `size()` 标记为 `constexpr` 表示"这个值在编译期就可以求值"，允许它被用在需要编译期常量的场景（如数组大小、`static_assert`、模板参数）。**这体现了模板编程里的一个核心考量：不仅要让类型工作，还要让类型的"元信息"能在编译期被其他代码查询和使用。**
+
+## 5. 编译期常量的价值与代价
+
+好处：数组大小、缓冲区容量等在编译期确定，避免运行期动态分配，编译器有更多机会做优化（如循环展开、内联），某些约束可以在编译期直接检查失败（如 `static_assert(N > 0)`）。代价：一旦用 value template parameter 固定了某个尺寸，`Buffer<int, 10>` 和 `Buffer<int, 20>` 是两个完全不同的类型，不能直接互相赋值或放进同一个容器，模板会为每个不同的 `N` 生成一份新的实例化代码（可能增加编译时间和二进制体积）。这是模板编程中反复出现的权衡：**编译期确定性 vs. 运行期灵活性和代码体积。**
+
+## 6. Range-based for 与 ADL：`begin()`/`end()` 是怎么被找到的
+
+```cpp
+for (auto& x : v) { /* ... */ }
+```
+
+这段语法糖大致展开为：
+
+```cpp
+{
+    auto&& __range = v;
+    auto __begin = begin(__range);
+    auto __end = end(__range);
+    for (; __begin != __end; ++__begin) {
+        auto& x = *__begin;
+        // ...
+    }
+}
+```
+
+`begin(__range)` 和 `end(__range)` 不是写死调用某个特定命名空间的函数，而是通过 **ADL（Argument-Dependent Lookup，参数依赖查找）** 来查找——编译器会在 `__range` 的类型所在的命名空间里查找 `begin`/`end` 的候选重载，也会考虑成员函数 `__range.begin()`/`__range.end()`。这就是为什么自定义类型只要提供了合适的 `begin()`/`end()`（成员函数或同命名空间的自由函数），就能直接被 range-based for 使用，而不需要显式 `using namespace std;` 或手写 `std::begin`。
+
+## 7. 几个容易忽略的坑
+
+**指针算术与 nullptr**：如果 `elem` 是 `nullptr`（如 `Vector` 尚未真正分配内存），任何基于 `elem` 的指针算术（包括 `elem + 0`）在严格意义上都属于未定义行为的灰色地带，即使实际运行时"看起来没出问题"。写 `begin()`/`end()` 时如果内部实现依赖指针运算，需要谨慎处理"空容器"这种边界情况。
+
+**`end()` 不应该有副作用，也不应该依赖调用 `begin()`**：如果 `end()` 的实现里意外调用了 `begin()`（比如两者都复用了同一段有副作用的逻辑，例如都触发了一次日志打印或惰性初始化），range-based for 展开后 `begin(__range)` 和 `end(__range)` 是两次独立调用，如果这个副作用本应只发生一次，就会出现重复副作用（如日志打印两次）——这是实现自定义迭代器接口时容易忽略的细节：`begin()`/`end()` 应该是幂等的纯查询操作，不应该携带每次调用都会触发的副作用。
+
+**`new T[s]` 对内建类型不会做值初始化**：`new T[s]` 会为每个元素调用默认构造，但如果 `T` 是 `int`、`double` 这类内建类型，默认构造等价于"不初始化"，元素的初始值是不确定的垃圾值——如果需要保证元素被清零，需要显式使用 `new T[s]()`（值初始化语法）或者构造后手动 `std::fill`/循环赋值。这是自己实现类似 `Vector` 的模板容器时非常容易踩的坑：容器"看起来能用"，但未初始化元素读到的值是不可预测的。
+
+**Rule of Three / Rule of Five**：如果一个类需要自定义析构函数（通常因为管理裸资源，如 `T* elem`），那么几乎总是也需要自定义 copy constructor 和 copy assignment operator（Rule of Three）；在 C++11 之后，如果还想支持高效的移动语义，通常还需要一并考虑 move constructor 和 move assignment operator（Rule of Five）。只写析构函数、依赖编译器生成的默认 copy 操作，对于管理裸指针的模板类几乎必然导致 double free 或浅拷贝共享同一块内存的问题。
+
+**size 类型的选择**：模板容器里表示"元素个数"的类型，应该优先考虑 `std::size_t`（无符号、与 `sizeof`/标准库容器保持一致）而不是 `int`（有符号，容量较大时可能溢出，且与标准库容器的 `size()` 返回类型不一致，混用时容易引发有符号/无符号比较的编译警告或潜在 bug）。选择 `int` 的写法（如本篇示例中的 `Vector`）通常是教学简化，真实工程代码里更常见 `size_t` 或模板化的 `size_type`。
+
+## 8. 模板 vs. 虚函数：两种不同的抽象/扩展机制
+
+模板（如 `Vector<T>`）在**编译期**解决"同一套逻辑适配不同类型"的问题，生成的是针对具体类型特化过的代码，调用开销通常更低，但每种类型组合都会生成一份独立代码（编译时间/体积代价），且要求类型信息在编译期已知。虚函数（如 `Container`/`Vector_container`）在**运行期**解决"同一套调用点需要适配不同实现"的问题，允许在运行时才决定具体调用哪个派生类的实现，付出的代价是一次间接调用和一个 vptr 的空间开销，但换来了运行期的灵活性（比如根据配置或用户输入决定具体使用哪个实现）。**这是 C++ 里"静态多态"和"动态多态"两条路线的核心权衡**：编译期已知、追求性能和类型安全，倾向模板；运行期才能确定、需要在同一套接口后切换实现，倾向虚函数。
+
+_Personal notes: to be added._

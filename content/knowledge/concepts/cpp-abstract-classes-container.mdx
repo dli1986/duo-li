@@ -1,0 +1,99 @@
+---
+title: "C++ 抽象类与对象生命周期：以 Container 为例"
+slug: "cpp-abstract-classes-container"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "OOP"
+summary: "梳理《A Tour of C++》抽象类一节的核心：抽象接口如何让通用逻辑先成立，具体派生类如何提供真实对象，以及 new/unique_ptr、cast、生命周期管理如何自然地成为抽象类讨论的延伸。"
+createdAt: "2026-09-23"
+---
+
+## 1. 抽象类 `Container`：接口契约，不是具体对象
+
+```cpp
+class Container {
+public:
+    virtual double& operator[](int) = 0;
+    virtual int size() const = 0;
+    virtual ~Container() {}
+};
+```
+
+`= 0` 表示纯虚函数，因此 `Container` 是抽象类，不能直接创建对象：
+
+```cpp
+Container c; // error: Container 是抽象类，不能实例化
+```
+
+原因是它没有完整实现、没有具体 representation、不知道元素到底怎么存——它只规定"必须支持哪些操作"（接口契约）。**Concrete class 表示一种具体对象状态；abstract class 定义一种可被使用的协议或接口。**
+
+## 2. 抽象基类通常没有自己的 representation
+
+对于 concrete class（如 `Vector`），有明确的 representation（`double* elem; int sz;`）和负责建立 invariant 的构造函数。但纯接口型的 `Container` 通常没有数据成员，所以没有必要显式写 constructor——注意这不是语言规则上的限制（抽象类完全可以有 constructor，例如持有数据成员的抽象基类），只是纯接口类没有数据要初始化。
+
+## 3. `Vector_container`：真正的 concrete derived object
+
+```cpp
+class Vector_container : public Container {
+public:
+    Vector_container(int s) : v(s) {}
+
+    double& operator[](int i) override { return v[i]; }
+    int size() const override { return v.size(); }
+
+private:
+    Vector v;
+};
+```
+
+`Vector_container` 继承 `Container`、实现纯虚函数、内部用 concrete class `Vector` 作为 representation，因此可以真正创建对象。可以理解成 adapter/wrapper：把内部的 concrete `Vector` 包装成外部可通过 abstract `Container` 使用的形式。
+
+## 4. `use(Container&)`：使用的是接口，不是对象本体
+
+```cpp
+void use(Container& c)
+{
+    const int sz = c.size();
+    for (int i = 0; i != sz; ++i)
+        std::cout << c[i] << '\n';
+}
+```
+
+`Container& c` 是一个基类引用，绑定到某个已经存在的派生类对象。`use()` **不拥有**对象，也不负责析构对象，只是借用对象——它的逻辑（拿 size、按 index 访问、输出）不依赖具体实现，只要对象满足 `Container` 接口就能工作。**抽象类让"使用逻辑"先成立；具体派生类让"运行实体"真正存在。**
+
+## 5. "some other function will have to make an object" 的含义
+
+`use(Container&)` 可以完全不知道具体实现细节，但它不能凭空工作——必须有另一个地方创建一个真正的 concrete object：
+
+```cpp
+void g()
+{
+    Vector_container vc(10); // make a concrete object
+    use(vc);                 // pass it as Container&
+}
+```
+
+真实对象是 `Vector_container`，`use()` 里看到的是 `Container&`——**真实实体是派生类，使用视角是基类引用，调用机制是 virtual dispatch**。当 `use()` 执行 `c.size()` / `c[i]` 时，实际调用会分派到 `Vector_container::size()` / `Vector_container::operator[]`，这就是 runtime polymorphism。
+
+## 6. 局部对象 vs. raw `new` 创建的对象
+
+**情况一**：局部 concrete object + 基类引用（`Vector_container vc(10); use(vc);`）——离开作用域自动析构，不需要 `new`/`delete`，适合对象只在当前 block 内使用的场景。
+
+**情况二**：raw `new` 创建派生类对象、返回基类指针，用于根据运行时条件创建不同 concrete derived object，但统一以 `Container*` 返回：
+
+```cpp
+Container* make_container(bool use_vector)
+{
+    if (use_vector)
+        return new Vector_container(10);
+    else
+        return new List_container(10);
+}
+```
+
+如果 `Vector_container` 内部还有 `Vector v`，而 `Vector v` 内部又有 `new double[10]`，会出现两层动态内存（整个 `Vector_container` 对象一层，`Vector` 内部管理的元素数组又一层）。这种写法必须记得显式 `delete p;`，否则 heap 上的对象不会被释放——raw `new`/`delete` 的问题是容易忘记 delete、异常路径下可能跳过 delete、ownership 不清晰，因此现代 C++ 通常尽量避免裸 `new`/`delete`（用 `std::unique_ptr` 替代，见配套的虚函数/unique_ptr 心智模型笔记）。
+
+_Personal notes: to be added._

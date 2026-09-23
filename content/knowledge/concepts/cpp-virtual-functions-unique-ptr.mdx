@@ -1,0 +1,145 @@
+---
+title: "C++ 虚函数机制与 unique_ptr 心智模型"
+slug: "cpp-virtual-functions-unique-ptr"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "OOP"
+  - "Memory Management"
+summary: "把抽象类（Container/use(Container&)）和 std::unique_ptr、vptr/vtbl 运行时分派机制串成一条完整心智链路：谁拥有对象、谁只是借用对象、虚函数调用最终如何落到真实派生类实现。"
+createdAt: "2026-09-23"
+---
+
+## 一句话总览
+
+> `std::unique_ptr<Container>` 负责拥有一个 heap 上的真实派生类对象；`use(*p)` 把这个真实对象以 `Container&` 的形式借给通用逻辑；通用逻辑只调用抽象接口；运行时通过对象内部的 `vptr` 找到对应的 `vtbl`，再调用真实派生类的虚函数实现。
+
+## 代码模型
+
+```cpp
+class Container {
+public:
+    virtual double& operator[](int) = 0;
+    virtual int size() const = 0;
+    virtual ~Container() = default;
+};
+
+class Vector_container : public Container {
+public:
+    Vector_container(int s) : v(s) {}
+    double& operator[](int i) override { return v[i]; }
+    int size() const override { return v.size(); }
+
+private:
+    Vector v;
+};
+
+std::unique_ptr<Container> make_container(bool use_vector)
+{
+    if (use_vector)
+        return std::make_unique<Vector_container>(10);
+    else
+        return std::make_unique<List_container>(10);
+}
+
+void use(Container& c)
+{
+    for (int i = 0; i != c.size(); ++i)
+        std::cout << c[i] << '\n';
+}
+
+void g()
+{
+    auto p = make_container(true);
+    use(*p);
+}
+```
+
+## 从创建对象到虚函数调用的完整链路
+
+```text
+make_container(true)
+    ↓
+std::make_unique<Vector_container>(10)
+    ↓
+在 heap/free store 上创建真实的 Vector_container 对象
+    ↓
+构造 Vector_container 内部的 representation，例如 Vector v
+    ↓
+Vector v 内部可能进一步执行 new double[10]
+    ↓
+编译器为这个 polymorphic object 设置隐藏的 vptr
+    ↓
+vptr 指向 Vector_container 对应的 vtbl
+    ↓
+返回 std::unique_ptr<Container>
+    ↓
+p 拥有这个真实对象，但对外以 Container 接口看待
+    ↓
+use(*p)
+    ↓
+use() 内部只知道 Container 接口
+    ↓
+c.size() / c[i]
+    ↓
+通过对象内部的 vptr 找到 vtbl，根据虚函数在 vtbl 中的固定 slot 找到函数指针
+    ↓
+调用 Vector_container::size() / Vector_container::operator[]
+```
+
+## 关键角色分工
+
+- **`Container`**：抽象接口，规定能做什么，不负责保存数据、创建对象、管理具体资源。
+- **`Vector_container`**：真实 concrete derived class，实现接口并持有具体 representation，是真正能被创建的对象。
+- **`std::unique_ptr<Container>`**：owner，拥有 heap 上的真实派生类对象，并在生命周期结束时自动 `delete`。注意通常应该是 `std::unique_ptr<Container>` 而不是 `std::unique_ptr<Container*>`。
+- **`use(Container&)`**：通用业务逻辑，只通过接口使用对象，不负责创建/拥有/析构对象。
+- **`vptr` / `vtbl`**：运行时多态的底层机制——每个 polymorphic object 通常有一个隐藏 vptr，每个 polymorphic class 通常有一张共享的 vtbl，vtbl 中保存虚函数对应的函数指针。
+
+## 为什么是 `use(*p)`，不是 `use(p)`？
+
+`p` 是 `std::unique_ptr<Container>`，是一个智能指针对象；而 `use()` 需要 `Container&`，所以必须解引用：`*p` 取出 unique_ptr 管理的真实对象，以 `Container&` 的形式传给 `use()`——**这只是借用，不是转移所有权**。`p` 负责 ownership，`use(*p)` 只是 usage，`use()` 结束后对象不会自动析构，真正的析构发生在 `p` 生命周期结束时（或显式调用 `p.reset()`）。
+
+## 对象布局的直觉模型
+
+```text
+heap 上的 Vector_container object
++------------------------------------+
+| hidden vptr -----------------------|----+
+| Vector v                           |    |
+|   elem ----> [ double ... ]        |    |
+|   sz                               |    |
++------------------------------------+    |
+                                          v
+                              Vector_container vtbl
+                              +-------------------------------+
+                              | &Vector_container::operator[] |
+                              | &Vector_container::size       |
+                              | &Vector_container::~...       |
+                              +-------------------------------+
+```
+
+## 静态类型 vs. 动态类型
+
+进入 `use(Container& c)` 后：`c` 的**静态类型**是 `Container&`，`c` 绑定对象的**动态类型**是 `Vector_container` 或 `List_container`。虚函数调用看的是动态类型——如果动态类型是 `Vector_container`，`c.size()` 调用 `Vector_container::size()`；如果是 `List_container`，调用 `List_container::size()`。
+
+## 空间与时间开销
+
+**空间**：每个有虚函数的对象多一个 vptr；每个有虚函数的类有一张共享的 vtbl；不是每个对象都有一整张 vtbl，通常只是有一个 vptr 指向共享 vtbl。
+
+**时间**：普通函数调用直接 call 已知函数地址；虚函数调用需要读取 vptr、读取 vtbl slot 中的函数指针、间接 call 该函数指针——比普通函数调用多一点间接访问，但这是轻量级机制。
+
+## 最简心智模型
+
+```text
+通用逻辑：use(Container&)
+抽象接口：Container
+真实对象：Vector_container / List_container
+对象拥有者：std::unique_ptr<Container>
+使用方式：use(*p)
+运行时分派：object.vptr -> class.vtbl -> function pointer
+最终效果：c.size() 调用真实派生类的 size()；c[i] 调用真实派生类的 operator[]
+```
+
+_Personal notes: to be added._
