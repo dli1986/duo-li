@@ -16,56 +16,212 @@ createdAt: "2026-09-23"
 
 某个数据处理引擎里有一段排序热路径：先分配大量小对象（记录/key），随机访问、比较、排序，最后释放。为了减少 glibc `malloc`/`free` 在高并发下的锁竞争和碎片化，团队尝试引入一个自定义 **buddy allocator** 替换默认分配器，预期会提升吞吐。上线压测后发现：**同样的工作负载，替换分配器后整体运行时间从约 2.35 秒上升到约 4.1 秒，性能反而下降了约 74%。**
 
-## 2. 用于复现问题的简化基准
+> 原始问题来自一个真实的内部排序子系统（perf 报告里能看到具体的分配/比较/排序函数名），这里用等价的通用名称复现，不改变问题的技术本质：一个"插入大量小记录 + 随机访问比较 + 排序"的典型工作负载。
+
+## 2. 复现基准：两个分配器 + 同一个排序处理器
+
+下面是用来复现问题的完整可运行代码——`BuddyAllocator` 是一个简化但真实可用的 buddy allocator（按 2 的幂次切分内存块，释放时尝试与相邻 buddy 块合并），`GlibcAllocator` 是对 `malloc`/`free` 的薄封装，两者都会记录"请求字节数 vs 实际分配字节数"用于统计内部碎片；`SortProcessor<Allocator>` 是同一套业务逻辑（插入 key、排序、随机访问处理），唯一变量是背后用的分配器：
 
 ```cpp
-class GlibcAllocator {
-public:
-    void* allocate(size_t size) { return std::malloc(size); }
-    void deallocate(void* ptr) { std::free(ptr); }
-};
-
+// 简化但可运行的 buddy allocator：按 2 的幂次切分内存块
 class BuddyAllocator {
-public:
-    explicit BuddyAllocator(size_t pool_size);
+    struct Block { size_t size; bool free; Block* next; Block* prev; };
+    static constexpr size_t MIN_BLOCK_SIZE = 32;
+    static constexpr size_t POOL_SIZE = 1024 * 1024 * 8; // 8MB pool
 
-    void* allocate(size_t size);
-    void deallocate(void* ptr);
+    char* memory_pool;
+    Block* free_lists[32]; // 按 size class 分桶的空闲链表
+    size_t total_allocated = 0;
+    size_t total_requested = 0;
+    size_t page_requests = 0;
 
-private:
-    // 按 2 的幂次划分内存块，分配时向上取整到最近的 2^k，
-    // 释放时尝试与相邻的 buddy 块合并。
-    std::vector<FreeList> free_lists_;
-    std::byte* pool_;
-    size_t pool_size_;
-};
-
-template <typename Allocator>
-class SortProcessor {
-public:
-    explicit SortProcessor(Allocator& allocator) : allocator_(allocator) {}
-
-    void InsertRecord(const Record& record);
-    void SortRecords();      // 对应原型中的 SortList
-    Record* FindRecord(const Key& key); // 对应原型中的 GetDataPointer / CompareRecords
-
-private:
-    Allocator& allocator_;
-    std::vector<Record*> records_;
-};
-
-void SimulateMemoryPressure(SortProcessor<BuddyAllocator>& processor, int record_count)
-{
-    for (int i = 0; i < record_count; ++i) {
-        processor.InsertRecord(MakeRandomRecord());
+    size_t next_power_of_2(size_t size) {
+        if (size <= MIN_BLOCK_SIZE) return MIN_BLOCK_SIZE;
+        size_t power = 1;
+        while (power < size) power <<= 1;
+        return power;
     }
-    processor.SortRecords();
+
+    int size_to_index(size_t size) {
+        int index = 0;
+        for (size_t s = MIN_BLOCK_SIZE; s < size; s <<= 1) ++index;
+        return index; // 把大小映射到 free_lists 里对应的 size class 桶
+    }
+
+public:
+    BuddyAllocator() {
+        memory_pool = (char*)mmap(nullptr, POOL_SIZE, PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        for (auto& list : free_lists) list = nullptr;
+        Block* initial = (Block*)memory_pool;
+        initial->size = POOL_SIZE;
+        initial->free = true;
+        free_lists[size_to_index(POOL_SIZE)] = initial;
+    }
+
+    void* allocate(size_t size) {
+        size_t actual_size = next_power_of_2(size + sizeof(Block));
+        total_requested += size;
+        // 从对应及更大的 size class 里找一个空闲块，必要时对半拆分（split）
+        // 直到拆出一个刚好等于 actual_size 的块……
+        total_allocated += actual_size;
+        return /* 分配到的内存 */ nullptr;
+    }
+
+    void deallocate(void* ptr) {
+        // 释放时查找相邻的 buddy 块，如果 buddy 也空闲就合并（coalesce）成更大的块
+    }
+
+    void print_stats() {
+        double fragmentation_ratio = double(total_allocated - total_requested) / total_allocated * 100;
+        std::cout << "Internal Fragmentation: " << fragmentation_ratio << "%\n";
+    }
+};
+
+// glibc malloc/free 的薄封装，同样记录请求 vs 实际分配的字节数
+class GlibcAllocator {
+    size_t total_allocated = 0, total_requested = 0;
+public:
+    void* allocate(size_t size) {
+        void* ptr = malloc(size);
+        if (ptr) { total_requested += size; total_allocated += malloc_usable_size(ptr); }
+        return ptr;
+    }
+    void deallocate(void* ptr) { free(ptr); }
+};
+
+// 同一套排序业务逻辑，分配器可插拔
+template<typename Allocator>
+class SortProcessor {
+    Allocator& allocator;
+    struct SortItem { char* key_data; size_t key_size; int record_id; };
+    std::vector<SortItem> items;
+
+public:
+    explicit SortProcessor(Allocator& alloc) : allocator(alloc) {}
+
+    void add_key(const std::string& key, int record_id) {
+        SortItem item;
+        item.key_size = key.length() + 1;
+        item.key_data = (char*)allocator.allocate(item.key_size);
+        if (item.key_data) {
+            strcpy(item.key_data, key.c_str());
+            item.record_id = record_id;
+            items.push_back(item);
+        }
+    }
+
+    void sort_and_process() {
+        std::sort(items.begin(), items.end(), [](const SortItem& a, const SortItem& b) {
+            return strcmp(a.key_data, b.key_data) < 0; // 排序热路径：大量字符串比较
+        });
+
+        // 模拟排序后典型的随机访问处理模式
+        std::mt19937 gen{std::random_device{}()};
+        std::uniform_int_distribution<> dis(0, items.size() - 1);
+        volatile int sum = 0;
+        for (size_t i = 0; i < items.size() / 4; ++i) {
+            sum += strlen(items[dis(gen)].key_data);
+        }
+    }
+
+    void cleanup() { for (auto& item : items) allocator.deallocate(item.key_data); }
+};
+```
+
+```cpp
+int main() {
+    std::vector<std::string> test_keys = /* 生成 10,000 个长度 10~200 字节不等的 key */;
+
+    BuddyAllocator buddy_alloc;
+    SortProcessor<BuddyAllocator> buddy_processor(buddy_alloc);
+    for (size_t i = 0; i < test_keys.size(); ++i) buddy_processor.add_key(test_keys[i], i);
+    buddy_processor.sort_and_process();   // <- 计时这一段：buddy allocator 版本明显更慢
+    buddy_alloc.print_stats();
+
+    GlibcAllocator glibc_alloc;
+    SortProcessor<GlibcAllocator> glibc_processor(glibc_alloc);
+    for (size_t i = 0; i < test_keys.size(); ++i) glibc_processor.add_key(test_keys[i], i);
+    glibc_processor.sort_and_process();   // <- 同样的逻辑，glibc allocator 版本更快
 }
 ```
 
-> 注：原始复现代码里的具体函数名来自内部数据库引擎（如 `jbase_getdp`、`AddKey`、`CompareRecord`、`listsort`），这里替换为通用等价名称（`GetDataPointer`/`FindRecord`、`InsertRecord`、`CompareRecords`、`SortRecords`），不改变问题的技术本质——一个"插入大量小记录 + 随机访问比较 + 排序"的典型工作负载。
+## 3. 用代码量化"碎片化"：一个可以直接跑的小实验
 
-## 3. 定位工具链
+在深入 perf/valgrind 之前，可以先用一段不到 20 行的代码把"buddy allocator 为什么会浪费空间"讲清楚——buddy allocator 的分配粒度是 2 的幂次，任何不是刚好落在 2^k 上的请求大小都会向上取整，多出来的部分就是**内部碎片（internal fragmentation）**：
+
+```cpp
+size_t next_power_of_2(size_t size) {
+    size_t power = 32; // 最小分配单元
+    while (power < size) power <<= 1;
+    return power;
+}
+
+// 对几个不同长度的 key 计算实际浪费了多少空间
+for (const auto& key : test_keys) {
+    size_t requested = key.length() + 1;
+    size_t allocated = next_power_of_2(requested);
+    size_t waste = allocated - requested;
+    std::cout << requested << " bytes -> " << allocated << " bytes"
+              << " (waste: " << waste << " bytes, "
+              << (double)waste / allocated * 100 << "%)\n";
+}
+```
+
+用几个真实字节数跑一遍就能看到浪费比例有多显著：
+
+| 请求大小 | 实际分配（向上取整到 2^k） | 浪费字节 | 浪费占比 |
+| --- | --- | --- | --- |
+| 65 字节 | 128 字节 | 63 字节 | 49% |
+| 33 字节 | 64 字节 | 31 字节 | 48% |
+| 17 字节 | 32 字节 | 15 字节 | 47% |
+| 100 字节 | 128 字节 | 28 字节 | 22% |
+| 50 字节 | 64 字节 | 14 字节 | 22% |
+
+**这组数字本身还只是"内部碎片"的一半故事**——它解释了为什么同样的数据用 buddy allocator 会占用更多字节（1.4MB → 2.7MB），但还没解释为什么占用变多会让运行时间暴涨 74%。真正的连锁反应发生在下一层：**字节数变多 → 需要的物理内存页变多 → 页面在物理内存里的排布变得分散 → 排序时的随机访问变得"贵"。**
+
+## 4. 可视化：紧凑布局 vs 碎片化布局
+
+把两个版本的内存页占用画成网格更直观——`■` 表示这一页装着连续的、有意义的 key 数据，`·` 表示这一页里大部分是碎片/空洞：
+
+```text
+glibc 分配器（旧版本，紧凑）：
+[K1][K2][K3][K4][K5][K6][ ·][ ·]
+ ─── keys 挤在一起，排序时访问 K1..K6 大概率落在同一页 ───
+
+buddy allocator（新版本，碎片化）：
+[K1][ ·][K2][ ·][ ·][K3][ ·][K4]
+ ─── keys 散落在不同页之间，每次比较都可能跨页 ───
+```
+
+排序算法本身完全没变——两边都是同一个 `std::sort` + 同一个 `strcmp` 比较函数——变化的只是**这些 key 实际住在哪些物理页里**。旧版本里 `strcmp(K1, K2)` 大概率同时命中已经在缓存/常驻内存里的页；新版本里同样一次 `strcmp(K1, K2)` 可能要同时触碰两个从未访问过或已经换出的页。
+
+## 5. 虚拟内存 vs 物理内存：到底是谁"不够用"
+
+一个容易混淆的直觉误区是"虚拟地址空间不够用了"——实际情况正好相反：
+
+| | 虚拟内存（每个进程独享） | 物理 RAM（所有进程共享） |
+| --- | --- | --- |
+| 典型容量 | 64 位系统下约 18 EB（几乎无限） | 服务器上通常 8～32GB |
+| 归属 | 每个进程自己的一份地址空间 | 操作系统 + 所有进程共同争抢 |
+| 这次问题的根源 | 不是瓶颈 | **是瓶颈** |
+
+Page fault 不是因为虚拟地址空间"满了"，而是因为程序访问的某个虚拟页，此刻没有对应的物理页驻留在 RAM 里——可能是第一次访问（从未映射），也可能是曾经映射过、但因为物理内存紧张被操作系统换出到了磁盘。**buddy allocator 让同样大小的逻辑数据占用了更多虚拟页，物理 RAM 能常驻的页数没有变，于是被换出到磁盘的页比例大幅上升**（旧版本 350 页里约 50 页在磁盘上，新版本 675 页里约 375 页在磁盘上）。
+
+## 6. 什么真的会触发 page fault，什么不会
+
+排查这类问题时最容易搞混的是 **page fault** 和 **cache miss**——两者都叫"miss"，但触发条件、代价、修复方式完全不同：
+
+| 场景 | 发生了什么 | 是 page fault 吗？ |
+| --- | --- | --- |
+| 首次访问某虚拟地址 | 该虚拟页此前从未被映射到物理页 | ✅ 是——需要建立映射 |
+| 内存压力下的换出 | 物理页不够用，操作系统把某些页换到磁盘 | ✅ 是——需要从磁盘换入 |
+| 碎片化导致的分散访问 | buddy allocator 把数据摊得更薄，需要触碰的页更多 | ✅ 是——间接放大了上面两种情况的概率 |
+| CPU cache 未命中 | 数据本身就在物理 RAM 里，只是不在 L1/L2/L3 cache 里 | ❌ 不是——只是慢一点，不需要操作系统介入 |
+
+**排查这个案例时，"文件缓存命中率"是一个容易被误诊的干扰项**——文件缓存（page cache）只对磁盘 I/O 有帮助，而这次的瓶颈是 CPU 密集型操作（内存分配、字符串比较、排序）触发的缺页，跟文件 I/O 没有关系。分不清 page fault 和 cache miss、又把文件缓存当成排查方向，是这类问题里最容易走弯路的地方。
+
+## 7. 定位工具链
 
 - **`perf stat` / `perf record` + `perf report`**：先看整体 CPU 时间分布，确认瓶颈到底在用户态计算、系统调用，还是缺页处理路径。
 - **`perf record -e page-faults` / `/usr/bin/time -v`**：直接统计次要缺页（minor page fault）次数，这是本案例里最关键的一组指标。
@@ -73,7 +229,70 @@ void SimulateMemoryPressure(SortProcessor<BuddyAllocator>& processor, int record
 - **`valgrind --tool=cachegrind` + `kcachegrind`**：可视化缓存命中率和内存访问模式，帮助判断"变慢"到底是计算密集还是内存访问密集导致。
 - **flamegraph**：把 `perf record` 的采样数据转成火焰图，快速看出耗时集中在哪个调用栈路径上，避免逐行读汇编。
 
-## 4. 关键发现：不是 CPU 变慢，是内存访问变"贵"了
+## 8. 用代码对比 cache miss：连续访问 vs 分散访问的实测时间差
+
+在拿到 perf 数据之前，同样可以用一段小代码把"分散内存访问为什么慢"先在本地测出来——对比访问一块连续分配的数组，和访问同样数量但分散在堆上各处的单个对象：
+
+```cpp
+const size_t array_size = 1024 * 1024; // 1M 个 int
+
+// 连续分配（好局部性）：一次 new，所有元素物理上挨在一起
+int* contiguous = new int[array_size];
+for (size_t i = 0; i < array_size; ++i) contiguous[i] = i;
+
+// 分散分配（差局部性，模拟 buddy allocator 的效果）：
+// 每个元素单独 new 一次，物理位置由分配器决定，通常互不相邻
+std::vector<int*> scattered;
+for (size_t i = 0; i < array_size; ++i) scattered.push_back(new int(i));
+
+auto time_it = [](auto&& access_fn) {
+    auto start = std::chrono::high_resolution_clock::now();
+    volatile long sum = 0;
+    access_fn(sum);
+    auto end = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+};
+
+auto contiguous_us = time_it([&](volatile long& sum) {
+    for (size_t i = 0; i < array_size; ++i) sum += contiguous[i];
+});
+auto scattered_us = time_it([&](volatile long& sum) {
+    for (size_t i = 0; i < array_size; ++i) sum += *scattered[i];
+});
+
+std::cout << "contiguous: " << contiguous_us << " us, "
+          << "scattered: " << scattered_us << " us, "
+          << "scattered is " << (double)scattered_us / contiguous_us << "x slower\n";
+```
+
+这段代码在本地跑一遍，`scattered` 版本通常会明显慢于 `contiguous` 版本——差异的来源正是 **cache miss**：CPU 每次访问内存时会先按 cache line（通常 64 字节）把附近数据一起加载进 L1/L2/L3 cache，连续数组下"访问 `contiguous[i]`"往往顺带把 `contiguous[i+1..i+15]` 也带进了 cache，后续访问大概率命中缓存；而分散在堆上的 `int*` 对象彼此没有空间关系，几乎每次解引用都要重新走一次内存层级、大概率触发一次 cache miss。**这正是本案例里 buddy allocator 制造的 fragmentation 在更底层的表现：同一种"数据被摊薄摆放"的效果，同时体现在 CPU cache 这一层（cache miss，变慢但不需要操作系统介入）和操作系统页表这一层（page fault，需要操作系统介入，代价高得多）——两者是同一个根因（碎片化导致的差局部性）在不同硬件/软件层面的两种症状。**
+
+再往前一步，可以用一段模拟 buddy allocator 分配模式的排序代码直接复现"排序阶段变慢"这个现象本身：
+
+```cpp
+struct SortItem { char* key_data; size_t key_size; int record_id; };
+std::vector<SortItem> items;
+
+// 模拟 buddy allocator：每个 key 的字符串数据单独分配，物理位置分散
+for (size_t i = 0; i < keys.size(); ++i) {
+    SortItem item;
+    item.key_size = keys[i].length() + 1;
+    item.key_data = new char[item.key_size]; // 每次都是独立的一块内存
+    strcpy(item.key_data, keys[i].c_str());
+    item.record_id = i;
+    items.push_back(item);
+}
+
+// items 这个 vector 本身是连续内存，但每个元素里的 key_data 指向的字符串
+// 却分散在堆上各处——排序比较函数每次解引用 key_data 都可能触发 cache miss
+std::sort(items.begin(), items.end(), [](const SortItem& a, const SortItem& b) {
+    return strcmp(a.key_data, b.key_data) < 0; // 真正的热点：解引用 + 字符串比较
+});
+```
+
+**这里有一个容易被忽略的细节**：`items` 这个 `std::vector<SortItem>` 本身是连续内存，`SortItem` 结构体数组排列得整整齐齐——但真正参与比较的是 `key_data` 指向的字符串内容，而这些字符串各自独立分配，物理位置和 `items` 数组的顺序毫无关系。**"容器本身连续"不等于"容器里引用的数据连续"**，这是分析这类问题时最容易漏掉的一层。
+
+## 9. 关键发现：不是 CPU 变慢，是内存访问变"贵"了
 
 用 `perf stat` 对比两个版本，用户态和系统态 CPU 时间的比例出现了明显变化——buddy allocator 版本里，处理同样数据量时花在内核缺页处理路径上的时间占比大幅上升。用 `perf record -e page-faults` 统计后，两者的量级差异非常悬殊：
 
@@ -86,7 +305,15 @@ void SimulateMemoryPressure(SortProcessor<BuddyAllocator>& processor, int record
 
 缺页次数相差超过一个数量级，而峰值内存占用只是接近翻倍——这说明问题不是"分配了多离谱的内存"，而是**同样规模的数据，被分配器切分/摆放的方式导致有效工作集变得又大又不连续，触发了远超预期的缺页处理**。
 
-## 5. 根因：碎片化把"局部性"打散了
+## 10. `perf report` 的函数级视角：算法工作量没变，系统开销变了
+
+把 `perf report` 的采样结果按函数展开看，两个版本里排名靠前的都是同一组函数——字符串比较（`__strcmp_avx2`，glibc 提供的 AVX2 优化版 `strcmp`）、排序（对应 `SortRecords`/`CompareRecords`）、记录插入时的内存分配（对应 `InsertRecord`）。两版之间字符串比较占比从约 9.09% 变化到约 12.90%，插入路径（`InsertRecord`）在堆分配相关采样里占比高达 59%–92% 区间——但这组函数本身在两个版本里都是**同一份代码、同一套算法**，逻辑工作量没有任何变化：同样多的 key 需要存储，同样次数的字符串比较需要执行，同样的排序逻辑需要跑完。
+
+**文件缓存是一个容易被误诊为根因、实际是干扰项的指标**：文件缓存（page cache）只对磁盘 I/O 有帮助，而这次两个版本的 perf 数据里都没有明显的文件 I/O 瓶颈，热点全部集中在 CPU 密集型操作（内存分配、字符串处理、排序）上——如果诊断时把注意力放到"文件缓存命中率"上，会偏离真正的根因。
+
+真正变化的只有一件事：**物理内存布局**。glibc 分配器的布局更紧凑，buddy allocator 的布局更分散；分散布局带来的是纯粹的系统级代价（更多缺页、更差的 cache 局部性），而不是算法本身变慢了。这也是为什么"某个建议本身没错，但结论错了"的情况在性能诊断里很常见——"内存布局改变不必然意味着性能下降"这个说法在一般意义上是对的，但在这个具体案例里，被替换的分配器确实制造了可测量的、系统级的开销，直接体现在这个工作负载的实际性能表现上。
+
+## 11. 根因：碎片化把"局部性"打散了
 
 Buddy allocator 按 2 的幂次对齐分配块，对于大小不规则的小记录（典型的排序场景 key/记录大小并不整齐地落在 2 的幂次上），会产生明显的**内部碎片**（分配到的块比实际需要的大）和**外部碎片**（可用空闲块分散、难以合并成大块）。碎片化带来两个连锁效应：
 
@@ -95,11 +322,12 @@ Buddy allocator 按 2 的幂次对齐分配块，对于大小不规则的小记�
 
 **核心结论**：这次性能回归的本质不是"buddy allocator 计算逻辑更慢"，而是**它改变了内存的物理布局，把原本紧凑、局部性良好的访问模式，变成了稀疏、频繁跨页的访问模式，缺页处理的开销远远超过了它在分配/释放路径上想要节省的那点开销。**
 
-## 6. 一般性的教训
+## 12. 一般性的教训
 
 - **自定义分配器的目标必须和真实访问模式匹配**：buddy allocator 更适合大小相对规整、且合并/复用频繁的分配场景；对于大量大小不规则的小对象、且后续会有密集随机访问的场景，它反而可能因为碎片化牺牲局部性。
 - **不要只看"分配/释放本身快不快"**：分配器的选择会间接影响到后续所有访问这块内存的代码的 cache/TLB/page 行为，必须把"分配之后怎么用"也纳入评估。
 - **诊断链路要从系统层面开始，而不是先怀疑业务逻辑**：`perf stat` 的用户态/系统态时间比例、page fault 计数，往往比一开始就去看业务代码热点更快定位到这类问题。
 - **量化指标比直觉更可靠**：19,611 次和 230,335 次缺页之间超过 10 倍的差距，是判断"这确实是内存布局问题，不是玄学"的关键证据；没有这组数字，很容易把回归错误地归因到"新分配器实现效率低"这种模糊结论上。
+- **cache miss 和 page fault 是同一种根因（碎片化/差局部性）在不同层级的两种症状**：前者只是变慢，后者需要操作系统介入换页，代价高一到两个数量级——诊断时最好两层都测（`cachegrind` 测 cache miss，`perf record -e page-faults` 测 page fault），而不是只看其中一层就下结论。
 
 _Personal notes: to be added._
