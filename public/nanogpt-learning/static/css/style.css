@@ -14,6 +14,20 @@
 }
 * { box-sizing: border-box; }
 html { font-size: 16px; }
+/* Defensive base case: ANY <pre>/<code> anywhere on the page is contained
+   and scrollable by default, even ones that don't go through the named
+   .code-panel/.notes-panel/.jupyter-panel pipelines (e.g. bare markdown
+   fenced blocks like <pre><code class="language-python">). More specific
+   rules below only need to add padding/color, not re-declare overflow. */
+pre {
+  overflow-x: auto; white-space: pre; max-width: 100%;
+}
+code {
+  overflow-wrap: break-word; word-break: break-word;
+}
+pre code {
+  overflow-wrap: normal; word-break: normal;
+}
 body {
   margin: 0; font-family: 'Segoe UI', system-ui, sans-serif;
   background: var(--bg); color: var(--text);
@@ -82,7 +96,7 @@ header.topbar {
 .site-subtitle { color: var(--text-dim); font-size: 15px; max-width: 800px; margin: 0; line-height: 1.6; }
 .step-list {
   list-style: none; margin: 28px 0 0; padding: 0; display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 12px;
 }
 .step-list li { margin: 0; }
 .step-list a {
