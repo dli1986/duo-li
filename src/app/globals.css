@@ -23,3 +23,27 @@
     --accent: #9aa5b1;
   }
 }
+
+/*
+ * Prose "breakout" grid: keeps body text at a comfortable reading measure
+ * (65ch, the Typography plugin default) while letting non-text blocks —
+ * code, tables, images, and custom embedded diagrams — use the full width
+ * of the (wider) article container. Collapses naturally on narrow/mobile
+ * viewports since the side gutter tracks just shrink to 0, no media
+ * queries needed.
+ */
+.prose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) min(65ch, 100%) minmax(0, 1fr);
+}
+.prose > * {
+  grid-column: 2;
+}
+.prose > pre,
+.prose > table,
+.prose > .not-prose {
+  grid-column: 1 / -1;
+  justify-self: center;
+  width: 100%;
+  max-width: 100%;
+}

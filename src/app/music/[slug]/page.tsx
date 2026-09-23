@@ -31,7 +31,7 @@ export default async function MusicEntryPage({
   }
 
   return (
-    <article className="mx-auto max-w-3xl px-6 py-16">
+    <article className="mx-auto max-w-6xl px-6 py-16">
       <h1 className="text-3xl font-semibold tracking-tight">{entry.title}</h1>
       <p className="mt-1 text-zinc-600 dark:text-zinc-400">
         {entry.artist}

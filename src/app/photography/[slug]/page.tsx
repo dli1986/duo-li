@@ -43,9 +43,9 @@ export default async function PhotoPage({
   ].filter(([, value]) => value) as [string, string][];
 
   return (
-    <article className="mx-auto max-w-3xl px-6 py-16">
+    <article className="mx-auto max-w-6xl px-6 py-16">
       <div className="relative aspect-[3/2] w-full overflow-hidden rounded-md bg-black/[.05] dark:bg-white/[.06]">
-        <Image src={photo.imageUrl} alt={photo.title} fill sizes="768px" className="object-contain" priority />
+        <Image src={photo.imageUrl} alt={photo.title} fill sizes="(max-width: 1152px) 100vw, 1152px" className="object-contain" priority />
       </div>
 
       <h1 className="mt-6 text-2xl font-semibold tracking-tight">{photo.title}</h1>

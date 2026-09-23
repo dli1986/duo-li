@@ -31,9 +31,7 @@ export default async function KnowledgeEntryPage({
   }
 
   return (
-    <article
-      className={`mx-auto px-6 py-16 ${entry.layout === "wide" ? "max-w-6xl" : "max-w-3xl"}`}
-    >
+    <article className="mx-auto max-w-6xl px-6 py-16">
       <p className="text-sm uppercase tracking-wide text-zinc-500">{entry.category}</p>
       <h1 className="mt-1 text-3xl font-semibold tracking-tight">{entry.title}</h1>
       <p className="mt-3 text-zinc-600 dark:text-zinc-400">{entry.summary}</p>

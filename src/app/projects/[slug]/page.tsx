@@ -30,7 +30,7 @@ export default async function ProjectPage({
   }
 
   return (
-    <article className="mx-auto max-w-3xl px-6 py-16">
+    <article className="mx-auto max-w-6xl px-6 py-16">
       <p className="text-sm uppercase tracking-wide text-zinc-500">{project.status}</p>
       <h1 className="mt-1 text-3xl font-semibold tracking-tight">{project.title}</h1>
       <time className="mt-1 block text-sm text-zinc-500">

@@ -31,7 +31,7 @@ export default async function ReadingEntryPage({
   }
 
   return (
-    <article className="mx-auto max-w-3xl px-6 py-16">
+    <article className="mx-auto max-w-6xl px-6 py-16">
       <h1 className="text-3xl font-semibold tracking-tight">{entry.bookTitle}</h1>
       <p className="mt-1 text-zinc-600 dark:text-zinc-400">{entry.author}</p>
       {entry.rating && <p className="mt-1 text-sm text-zinc-500">Rating: {entry.rating}/5</p>}

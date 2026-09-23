@@ -14,7 +14,6 @@ export interface KnowledgeFrontmatter {
   summary: string;
   createdAt: string;
   updatedAt?: string;
-  layout?: "wide"; // opt-in wider article container for entries with embedded nested/grid visualizations
 }
 
 export interface KnowledgeEntry extends KnowledgeFrontmatter {

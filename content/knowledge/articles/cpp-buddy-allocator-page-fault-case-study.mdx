@@ -10,7 +10,6 @@ tags:
   - "Memory Management"
 summary: "一次真实性能回归的复盘：把默认的 glibc 分配器换成自定义 buddy allocator 后，一个排序场景的吞吐下降约 74%。用 perf/valgrind/kcachegrind 定位到根因是内存碎片化导致有效工作集膨胀、page fault 次数暴涨，而不是 CPU 指令本身变慢。"
 createdAt: "2026-09-23"
-layout: "wide"
 ---
 
 ## 1. 背景：一次看似无害的分配器替换

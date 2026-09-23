@@ -11,7 +11,6 @@ tags:
   - "Memory Management"
 summary: "一种用 mmap 直接承载 B+Tree 索引文件的架构：父节点存的是文件偏移量而不是内存指针，虚拟地址 = mmap_base + file_offset，省去反序列化；配合一个按叶子页存在性建立的 bitmap，可以在不访问叶子页的情况下快速判断某个 key 一定不存在。"
 createdAt: "2026-09-23"
-layout: "wide"
 ---
 
 ## 1. 核心思想：父节点存的是文件偏移量，不是指针
