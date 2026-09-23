@@ -1,0 +1,433 @@
+---
+title: "C++ Copy 与 Move 语义详解：结合 LevelDB 源码"
+slug: "cpp-copy-move-semantics-leveldb"
+category: "Systems Engineering"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "C++"
+  - "Memory Management"
+  - "LevelDB"
+summary: "系统梳理 C++ copy/move constructor、copy/move assignment、lvalue/rvalue、T&/const T&/T&&、std::move 的本质，并对照 LevelDB 中 Status、Slice、WriteBatch、Iterator 等真实类型的 ownership 设计，给出一份可运行的 Vector 示例与阅读 checklist。"
+createdAt: "2026-09-23"
+---
+
+> 目标：把 copy / move / lvalue / rvalue / reference / ownership 的核心理解串起来，并结合 LevelDB 中的 `Status`、`Slice`、`WriteBatch`、`Iterator` 等真实代码设计进行对照。本文包含一个可运行的 `Vector` 示例，用于直观看到 copy constructor、copy assignment、move constructor、move assignment 的触发时机。
+
+## 0. 核心路线
+
+```text
+Resource-owning concrete class
+        ↓
+Copy constructor / copy assignment
+        ↓
+Deep copy：每个对象拥有自己的 value
+        ↓
+Move constructor / move assignment
+        ↓
+Ownership transfer：转移 representation，避免昂贵 copy
+        ↓
+T& / const T& / T&&
+        ↓
+lvalue / rvalue / std::move
+        ↓
+RAII + invariant preservation
+```
+
+更简洁地说：
+
+- **Copy**：复制 value。source object 和 target object 都独立有效。
+- **Move**：转移 resource ownership。target 接管资源。source 仍然 valid，但原 value 不再保证。
+
+## 1. Construction vs Assignment
+
+学习 copy/move 之前，必须先区分 construction（对象之前不存在）与 assignment（对象已经存在）。
+
+```cpp
+Vector v1{1, 2, 3, 4};
+Vector v2(v1);
+Vector v3 = v1;
+```
+
+`v2`、`v3` 都是新对象，触发的是 `Vector(const Vector& rhs)`（copy constructor）——注意 `Vector v3 = v1;` 虽然语法中有 `=`，但这仍然是 construction，不是 assignment。
+
+```cpp
+Vector v3{1, 2, 3, 4, 5};
+Vector v4{1, 2, 3};
+v4 = v3;
+```
+
+`v4` 已经存在，`v4 = v3;` 触发的是 `Vector& operator=(const Vector& rhs)`（copy assignment）。assignment 的关键问题是：目标对象已经有旧资源，现在它要变成另一个 value，因此必须处理旧资源——这就是为什么 copy assignment 通常会出现 `delete[] elem_;` 这样的逻辑。
+
+## 2. Copy：复制 value，每个对象都独立有效
+
+对于 owning 类型，copy constructor 通常需要 deep copy：
+
+```cpp
+Vector::Vector(const Vector& rhs)
+    : elem_{new double[rhs.sz]}, sz{rhs.sz}
+{
+    for (int i = 0; i != sz; ++i) {
+        elem_[i] = rhs.elem_[i];
+    }
+}
+```
+
+如果不是 deep copy，两个对象会以为自己拥有同一块内存，析构时可能 double delete，修改一个对象也可能影响另一个对象。
+
+## 3. Copy Assignment：已有对象改变 value
+
+copy assignment 比 copy constructor 更复杂，因为 target object 已经存在、已经拥有旧资源：
+
+```cpp
+Vector& Vector::operator=(const Vector& rhs)
+{
+    if (this == &rhs) {
+        return *this;
+    }
+
+    double* p = new double[rhs.sz];
+
+    for (int i = 0; i != rhs.sz; ++i) {
+        p[i] = rhs.elem_[i];
+    }
+
+    delete[] elem_;
+
+    elem_ = p;
+    sz = rhs.sz;
+
+    return *this;
+}
+```
+
+这里建议**先 `new` 再 `delete`**：如果先 `delete[] elem_`，然后 `new` 失败，当前对象就可能进入坏状态；先分配新资源，成功后再释放旧资源，可以更好地维护 class invariant（public API 返回后，对象必须仍然处于合法状态）。
+
+## 4. Move：转移 resource ownership，避免昂贵 copy
+
+```cpp
+Vector make_vector()
+{
+    Vector v{1, 2, 3, 4, 5};
+    return v;
+}
+
+Vector x = make_vector();
+```
+
+`make_vector()` 返回的是一个临时结果，如果执行 copy 需要重新分配内存并复制元素；但临时对象马上就不用了，所以可以 move——move 的核心是**不复制资源内容，只转移资源句柄**。
+
+## 5. Move Constructor
+
+```cpp
+Vector::Vector(Vector&& rhs) noexcept
+    : elem_{rhs.elem_}, sz{rhs.sz}
+{
+    rhs.elem_ = nullptr;
+    rhs.sz = 0;
+}
+```
+
+语义：target object 接管 rhs 的 array，rhs 不再拥有 array，rhs 被放回一个合法、可析构、可重新赋值的状态。move 之后 rhs 没有被销毁，它仍然是一个对象，仍然会执行 destructor，可以被重新赋值——但它原来的 value 不再保证存在。
+
+## 6. Move Assignment
+
+```cpp
+Vector v1{1, 2, 3, 4};
+Vector v2{10, 20};
+v2 = std::move(v1);
+```
+
+**写法一：释放 target 旧资源，然后 steal source 资源**
+
+```cpp
+Vector& Vector::operator=(Vector&& rhs) noexcept
+{
+    if (this == &rhs) {
+        return *this;
+    }
+
+    delete[] elem_;
+
+    elem_ = rhs.elem_;
+    sz = rhs.sz;
+
+    rhs.elem_ = nullptr;
+    rhs.sz = 0;
+
+    return *this;
+}
+```
+
+**写法二：swap-based move assignment**
+
+```cpp
+Vector& Vector::operator=(Vector&& rhs) noexcept
+{
+    if (this == &rhs) {
+        return *this;
+    }
+
+    std::swap(elem_, rhs.elem_);
+    std::swap(sz, rhs.sz);
+
+    return *this;
+}
+```
+
+这种写法的效果是：当前对象接管 rhs 的资源，rhs 接管当前对象原来的旧资源，函数结束后 rhs 会析构，释放当前对象原来的旧资源。**关键点：如果使用 swap-based move assignment，必须同时 swap `elem_` 和 `sz`**——只 swap 指针、忘了 swap 长度字段，会破坏对象的 invariant（指向长度为 6 的数组，但 `sz` 仍是旧值 3）。
+
+## 7. lvalue / rvalue：不要从等号左右字面理解
+
+更好的理解方式：
+
+- **lvalue**：有身份、有名字、可以被再次引用的表达式。
+- **rvalue**：临时值，或被显式标记为可移动的表达式。
+
+```cpp
+Vector v{1, 2, 3};
+```
+
+表达式 `v` 是 lvalue，因为它有名字，可以反复使用；而 `Vector{1, 2, 3}` 是临时对象，是 rvalue。
+
+## 8. `T&`、`const T&`、`T&&`
+
+- **`T&`**：可修改借用。函数借用了一个已经存在的对象，可以修改它，但不拥有它，也不负责释放它。普通 `T&` 通常不能绑定临时对象。
+- **`const T&`**：只读借用，可绑定临时对象。C++ 会延长临时对象的生命周期，让它至少活到函数调用结束。心智模型：只读借用，不 copy，不拿走资源，可接收已有对象或临时对象。
+- **`T&&`**：可绑定 rvalue，通常表示"可移动"。但 `T&&` 本身不等于已经发生 move——真正的 move 发生在 move constructor / move assignment，或函数内部继续 `std::move` 给其他对象时。
+
+## 9. `std::move`：不是 move，而是 cast
+
+`std::move(v)` 本身**不移动任何资源**。它只是把表达式 `v` cast 成 rvalue expression，告诉编译器"我允许你把 v 当作一个可以被移动的对象"。真正的资源转移发生在它被用于构造、赋值、或传给接收 `T&&` 的函数等上下文时。
+
+## 10. 为什么 `T&&` 参数在函数内部是 lvalue？
+
+需要区分两个概念：变量/参数的 **declared type**，与表达式的 **value category**。
+
+```cpp
+void f(Vector&& v)
+{
+    Vector a = v;             // copy constructor
+    Vector b = std::move(v);  // move constructor
+}
+```
+
+`v` 的 declared type 是 `Vector&&`，但函数体内表达式 `v` 有名字、可以被反复使用，所以表达式 `v` 本身是 lvalue。因此 `Vector a = v;` 触发 copy constructor，而 `Vector b = std::move(v);` 才触发 move constructor。可以这样记：`Vector&& v` 负责接收 rvalue，但函数体内的 `v`（因为有名字）是 lvalue 表达式；`std::move(v)` 把这个 lvalue expression 再 cast 成 rvalue expression。
+
+## 11. Move 的正确性依赖 class invariant
+
+move 不是随便把指针拷走。它必须保证：target object 获得资源后 invariant 成立，source object 失去资源后仍然 invariant 成立。以 `Vector` 为例，move constructor 里把 `rhs.elem_` 置为 `nullptr`、`rhs.sz` 置为 `0`，不是形式主义，而是在给 moved-from object 建立一个合法状态（空 Vector）。**move = ownership transfer + invariant preservation。**
+
+## 12. 完整 Vector 示例：可观察 copy/move 触发
+
+```cpp
+#include <algorithm>
+#include <initializer_list>
+#include <iostream>
+#include <utility>
+
+class Vector {
+private:
+    double* elem_ = nullptr;
+    int sz = 0;
+
+public:
+    explicit Vector(int s)
+        : elem_{new double[s]}, sz{s}
+    {
+        std::cout << "recv num constructor\n";
+    }
+
+    Vector(std::initializer_list<double> ls)
+        : elem_{new double[ls.size()]}, sz{static_cast<int>(ls.size())}
+    {
+        std::copy(ls.begin(), ls.end(), elem_);
+        std::cout << "initializer_list constructor\n";
+    }
+
+    // copy constructor
+    Vector(const Vector& rhs)
+        : elem_{new double[rhs.sz]}, sz{rhs.sz}
+    {
+        for (int i = 0; i != sz; ++i) {
+            elem_[i] = rhs.elem_[i];
+        }
+        std::cout << "copy constructor\n";
+    }
+
+    // copy assignment
+    Vector& operator=(const Vector& rhs)
+    {
+        std::cout << "copy assignment\n";
+        if (this == &rhs) {
+            return *this;
+        }
+        double* p = new double[rhs.sz];
+        for (int i = 0; i != rhs.sz; ++i) {
+            p[i] = rhs.elem_[i];
+        }
+        delete[] elem_;
+        elem_ = p;
+        sz = rhs.sz;
+        return *this;
+    }
+
+    // move constructor
+    Vector(Vector&& rhs) noexcept
+        : elem_{rhs.elem_}, sz{rhs.sz}
+    {
+        rhs.elem_ = nullptr;
+        rhs.sz = 0;
+        std::cout << "move constructor\n";
+    }
+
+    // move assignment (swap-based)
+    Vector& operator=(Vector&& rhs) noexcept
+    {
+        std::cout << "move assignment\n";
+        if (this == &rhs) {
+            return *this;
+        }
+        std::swap(elem_, rhs.elem_);
+        std::swap(sz, rhs.sz);
+        return *this;
+    }
+
+    ~Vector()
+    {
+        delete[] elem_;
+        std::cout << "destructor, size = " << sz << "\n";
+    }
+
+    int size() const { return sz; }
+
+    void print_state(const char* name) const
+    {
+        std::cout << name << ": size = " << sz
+                  << ", elem_ = " << static_cast<const void*>(elem_)
+                  << "\n";
+    }
+};
+
+void inspect(const Vector& v)
+{
+    std::cout << "inspect(const Vector&), size = " << v.size() << "\n";
+}
+
+void consume(Vector&& v)
+{
+    std::cout << "consume(Vector&&) entered\n";
+    // v has type Vector&&, but expression v is lvalue because it has a name.
+    Vector copy_from_v = v;             // copy constructor
+    Vector move_from_v = std::move(v);  // move constructor
+    std::cout << "consume(Vector&&) leaving\n";
+}
+
+int main()
+{
+    // copy constructor
+    Vector v1{1, 2, 3, 4};
+    Vector v2 = v1;
+
+    // copy assignment
+    Vector v3{1, 2, 3, 4, 5};
+    Vector v4{1, 2, 3};
+    v4 = v3;
+
+    // move constructor
+    Vector v5{1, 2, 3, 4, 5, 6};
+    Vector v6 = std::move(v5);
+    v5.print_state("v5 after move construction");
+    v6.print_state("v6 after move construction");
+
+    // move assignment
+    Vector v7{7, 8, 9};
+    Vector v8{10, 11};
+    v8 = std::move(v7);
+    v7.print_state("v7 after move assignment");
+    v8.print_state("v8 after move assignment");
+
+    // const T& can bind temporary object
+    inspect(Vector{1, 2, 3});
+
+    // T&& can bind temporary object
+    consume(Vector{4, 5, 6});
+
+    return 0;
+}
+```
+
+## 13. 常见坑点回顾
+
+- `Vector v2 = v1;` 是 copy **construction**（新对象），不是 copy assignment。
+- `v4 = v3;`（`v4` 已存在）才是 copy **assignment**，需要处理 `v4` 原有的资源。
+- `Vector v6 = std::move(v5);` 是 move construction；`std::move(v5)` 只是 cast，真正接管资源的是 move constructor。
+- `v8 = std::move(v7);`（`v8` 已存在）是 move assignment。
+- swap-based move assignment 必须**同时** swap 所有成员（例如 `elem_` 和 `sz`），只 swap 一部分会破坏 invariant。
+
+## 14. LevelDB 对照阅读点
+
+LevelDB 虽然不是全面使用现代 C++ 风格的项目，但有很多非常清晰的 ownership / copy / move 设计，很适合结合本文对照阅读。
+
+### 14.1 `leveldb::Status`：最接近 Vector move/copy 的真实例子
+
+`Status` 表示一次操作的结果（成功或失败，可能携带错误信息），内部维护一个 `state_` 指针（`nullptr` 表示 OK，非空指向错误信息）。它的 move constructor 与 `Vector` 几乎是同一类模式：
+
+```cpp
+Status(Status&& rhs) noexcept
+    : state_(rhs.state_)
+{
+    rhs.state_ = nullptr;
+}
+```
+
+move 后，target Status 接管错误信息 representation，source Status 的 `state_` 被置为 `nullptr`，仍是合法对象、可以析构。
+
+### 14.2 `leveldb::Slice`：copy 不一定是 deep copy
+
+`Slice` 用来表示一段 byte array 的 view，不拥有 `data_` 指向的内存：
+
+```cpp
+class Slice {
+public:
+    Slice(const char* d, size_t n) : data_(d), size_(n) {}
+    Slice(const std::string& s) : data_(s.data()), size_(s.size()) {}
+
+    // Intentionally copyable.
+    Slice(const Slice&) = default;
+    Slice& operator=(const Slice&) = default;
+
+private:
+    const char* data_;
+    size_t size_;
+};
+```
+
+copy 一个 `Slice` 只是复制 `data_` 指针和 `size_`，不是 deep copy。这是理解 copy/move 的重要反例：**copy 是否 deep copy，取决于类型的 ownership 语义**——`Vector` 是 owning type，copy 应该 deep copy；`Slice` 是 non-owning view，copy 只是复制 view。读 C++ 类型时，不能只看 copy constructor 是否存在，必须先判断这个类型是否拥有资源。
+
+### 14.3 `leveldb::WriteBatch`：明确可 copy 的 value-like 类型
+
+`WriteBatch` 表示一批要原子写入 DB 的更新操作，明确声明 `= default` 的 copy constructor/assignment，说明作者认为复制一批写操作在语义上是合理的（内部用 encoded representation 保存 batch 内容）。它还有 `void Append(const WriteBatch& source);`——`source` 只是被只读借用，`Append` 会把 `source` 的 operations copy/append 到当前 batch，`source` 自己不会被 move 或清空。这体现了：`const T&` 表示只读借用，copy/append 表示复制 value 内容，而不是转移 ownership。
+
+### 14.4 Iterator：有些类型应该禁止 copy
+
+LevelDB 中有些 iterator 实现明确写：
+
+```cpp
+MemTableIterator(const MemTableIterator&) = delete;
+MemTableIterator& operator=(const MemTableIterator&) = delete;
+```
+
+这表达：这个对象绑定内部遍历状态或资源，随便 copy 语义不清晰或容易导致错误，所以作者明确禁止 copy——不是所有 class 都应该支持 copy 或 move，是否 copyable/movable 取决于它的 ownership、invariant 和 semantic contract。
+
+## 15. 阅读 Checklist
+
+以后读一个 C++ class，可以问自己：
+
+**这个类型是否 owning？** 它是否拥有内存 / file handle / socket / lock / DB resource？是否需要 destructor 手动释放资源？owning 类型 copy 通常需要 deep copy 或直接禁止 copy，move 通常可以转移资源；non-owning view 的 copy 可能只是复制 pointer + size。（LevelDB 对照：`Status` 是 owning error state，`Slice` 是 non-owning view，`WriteBatch` 是 value-like encoded operations。）
+
+**这个类型是否应该 copyable？** 复制这个对象在语义上是否合理？复制后两个对象是否应该互不影响？copy 是 deep copy 还是 shallow copy？是否会导致 double delete？
+
+**这个类型是否应该 movable？** 它是否持有可以转移的资源？move 后 source object 如何保持合法？move constructor 是否把 source 清空？move assignment 是否处理 target 的旧资源？
+
+_Personal notes: to be added._

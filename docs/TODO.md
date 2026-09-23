@@ -16,7 +16,7 @@ Living status doc — what's actually live, what's designed-but-not-built, and w
 | Section | Status |
 |---|---|
 | Home / Now / About / Projects | Built, real content. Projects page is a chronological timeline (8 entries, `startDate` auto-fetched from GitHub repo `created_at` when omitted from frontmatter) |
-| Knowledge | Pipeline built, **1 real article** (`ner-encoder-only.mdx`). Grouped-by-category list page. |
+| Knowledge | Pipeline rebuilt with `kind`/`sourceType` discriminator + subfolder layout (`docs/knowledge-architecture.md`). Only 2 top-level categories now: `AI`, `Systems Engineering` — everything finer-grained is a `tag`. **5 real entries**: `ner-encoder-only` (article), `agent-architecture-state-graph-middleware` (concept), `grpo-reasoning-vs-reward-shaping` (concept), `cpp-copy-move-semantics-leveldb` (concept), `aix-linux-cross-platform-eval-order-bug` (article) — first batch migrated from `PKG/`'s unstructured topic folders. |
 | Notes | Pipeline built, **0 entries** — still renders the `ComingSoon` stub |
 | Reading | Pipeline built, **0 entries** — still renders the `ComingSoon` stub |
 | Music | Pipeline built, **1 real entry** (`si-shi-gu-ren-lai.mdx`, sourced from verified MusicBrainz data). Site-wide BGM player component exists but is inert in production (see "Blocked" below) |

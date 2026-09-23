@@ -1,0 +1,65 @@
+---
+title: "GRPO 训练过程解析：强化的是奖励模式，不是真正的推理"
+slug: "grpo-reasoning-vs-reward-shaping"
+category: "AI"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "RLHF"
+  - "GRPO"
+  - "Fine-tuning"
+summary: "GRPO 等强化学习方法并不会真正教会模型推理，而是通过奖励函数强化那些看起来像推理的输出模式；奖励函数设计的重要性类似于 SFT 阶段数据质量的重要性，常见做法是用强模型（LLM-as-a-judge）来打分。"
+createdAt: "2026-09-23"
+---
+
+## 核心观点：不是"给予"推理能力，而是奖励被解读为推理的模式
+
+LLM 并不"理解"逻辑或像人一样推理。它是在**统计意义上向被奖励的模式靠拢**。如果这些模式*看起来*像推理——分步链条、演绎、类比式回答——模型就会表现得*仿佛*会推理。
+
+从外部看到的"推理"，本质是：模型发现生成某些序列会带来更高的期望奖励。
+
+## 奖励设计 ≈ RL 阶段的"数据质量"
+
+这是一个有用的类比：
+
+| SFT 阶段 | RL 阶段 |
+| --- | --- |
+| 高质量的 prompt 与 completion | 高质量的奖励函数 |
+| 用强模型生成示范数据 | 用强模型评估/打分 completion |
+| 微调模型向更好输出靠拢 | 通过提高高分输出的概率来强化它们 |
+
+正如 SFT 高度依赖**优质示范数据**，RL 同样高度依赖**准确的奖励信号**。
+
+## 为什么常常需要强模型（如 GPT-4）来打分
+
+为诸如"推理准确性""连贯性""事实使用是否恰当""解释质量"这类抽象任务手写奖励函数非常困难。
+
+现代常见做法是：用一个强 LLM（例如 GPT-4）按照 rubric 对每个生成结果打分或排序——这通常被称为 **LLM-as-a-judge**。
+
+示例奖励函数（基于 GPT-4）：
+
+```python
+def reward_fn(prompt, candidate, reference):
+    rubric = f"""
+    Task: {prompt}
+    Candidate answer: {candidate}
+    Reference answer: {reference}
+
+    Rate the candidate from 1 (very poor) to 10 (perfect) based on:
+    - Factual accuracy
+    - Logical consistency
+    - Step-by-step reasoning
+    - Clarity of explanation
+
+    Only return a single number.
+    """
+    return call_gpt4(rubric)  # e.g. via OpenAI API
+```
+
+同样的思路也可以让强模型对 K 个候选回答排序或选出最优（DPO 中也常用这种做法）。
+
+## 结论
+
+RLHF 类方法（包括 GRPO）并不会直接创造推理能力。它们**引导模型**产出与我们定义的奖励函数对齐的输出。当奖励函数设计得当（往往借助强 LLM），模型就会表现出"像是在推理"——因为那些行为正是被强化的对象。
+
+_Personal notes: to be added._

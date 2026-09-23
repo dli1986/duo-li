@@ -1,0 +1,100 @@
+---
+title: "Agent 架构核心概念：State、Graph 与 Middleware"
+slug: "agent-architecture-state-graph-middleware"
+category: "AI"
+kind: "concept"
+sourceType: "pkg-legacy"
+tags:
+  - "Agent"
+  - "LangGraph"
+  - "ReAct"
+summary: "从 State（共享持久数据）、Graph（节点+边的状态驱动控制流）、Middleware（hook 治理机制）三个核心抽象，系统梳理 LangChain/LangGraph Agent 体系的本质，以及 ReAct 循环、注解驱动 state schema 与传统反射机制的区别。"
+createdAt: "2026-09-23"
+---
+
+无论是 LangChain Agents 还是 LangGraph Agents，核心思想都是：
+
+> **LLM 决策 + 工具调用 + 结果观察 的循环（ReAct），由 State 驱动，由 Graph（节点+边）调度。**
+
+## 1. ReAct = Reason → Act → Observe（循环）
+
+ReAct 是 Agent 的逻辑核心，在 LangGraph 中更清晰地表现为节点图：
+
+1. **Reason（LLM 思考）** —— 根据当前 state（对话历史、上下文、工具返回结果），生成下一步行动。
+2. **Act（工具调用）** —— LLM 决策触发某工具节点执行。
+3. **Observe（读取工具结果）** —— 工具节点返回结果，写入 State，成为下一次 Reason 的输入。
+
+如此周而复始，直到 LLM 决定 finish。
+
+## 2. State：整个 Agent 的"共享、持久数据快照"
+
+State 是整个 Agents 体系中最核心的抽象，可以理解为：一个持久化的共享数据结构，所有节点都读它，也写它。
+
+State 通常包含：
+
+- **messages**：对话历史（LLM 输出、工具结果、用户消息）
+- **documents**：检索结果或外部输入
+- **tool_results**：工具结果
+- **变量**：如 attempt_count / summary / intermediate draft
+- **其他上下文信息**：任务状态、控制变量
+
+State schema 通过 Python `TypedDict` 或 LangGraph 的 `Annotation`（支持 reducer 操作，如 append）定义。
+
+### State 的两个关键特性：持久 + 共享
+
+- **持久（Persistent）**：每个节点写入的更新都保留下来，被后续节点看到。
+- **共享（Shared）**：所有节点读取同一个 state —— 对整个 agent 来说，它是单一真实来源（single source of truth）。
+
+在 ReAct 中体现为：工具执行完把 `ToolMessage` 写进 `state.messages` → 下一次 LLM 节点看到更新后的 messages → 继续 reasoning 或调用下一工具。
+
+## 3. Graph（节点 + 边）：代替传统 switch-case 状态机
+
+LangGraph 中：
+
+- **Nodes（节点）** = 执行逻辑（LLM 推理、工具调用、纯代码）
+- **Edges（边）** = 状态转移逻辑（固定转移或基于 state 的条件跳转）
+
+一个便于理解的类比：
+
+| C/C++ switch-case 状态机 | LangGraph Graph |
+| --- | --- |
+| `state == X` → 执行动作 | 节点 Node 执行动作 |
+| `state = NEXT_STATE` 转移 | Edge 根据 state 决定下一节点 |
+| 状态存 struct / global | State schema（TypedDict） |
+
+熟悉 switch-case 状态机写法的话，可以这样对应：Node = case 内执行逻辑，Edge = case 内的 `state = XXX`，State = 保存整个上下文结构。
+
+## 4. Middleware（中间件）= Agent Hook 系统
+
+LangChain 中间件提供 hook 点来拦截 Agent 的执行流程，在模型调用前/后、工具调用前/后插入逻辑，提供两种 Hook 类型：
+
+**① Node-style Hooks（节点式）**：在关键点插入逻辑——`before_model`（每次模型调用前）、`after_model`（每次模型响应后）、`before_agent` / `after_agent`（一次）。适合限制模型调用次数、预处理消息、自动摘要、人类审批。
+
+**② Wrap-style Hooks（包裹式）**：环绕模型/工具调用——`wrap_model_call`、`wrap_tool_call`。适合重试、缓存、超时、短路执行。
+
+中间件使最终的 agent 更加规范化、可控化：控制信息传递、控制调用流程、控制上下文管理、控制安全/审核/隐私。
+
+## 5. 反射（Reflection）与 State schema 的关系
+
+这是一个容易混淆的概念区分：
+
+- **Java 中**：反射是运行时检查结构 & 动态调用方法。
+- **Python + LangGraph 中**：LangGraph **并不使用"反射"去动态检查类/方法**。它只是读取 `TypedDict` / `Annotation`（包括 reducer）来构造 state merge 规则，不扫描方法或字段，也不做动态 method invocation。
+
+因此：**LangGraph 的 State schema 是"注解驱动（annotation-driven）"，而不是"反射驱动（reflection-based）"**。
+
+## 6. 为什么 Agents 需要 Graph + State + Middleware？
+
+三者各司其职：
+
+- **State** 提供上下文基础（事实来源）：确保所有节点看到同样的上下文，并写入结果。
+- **Graph** 提供控制逻辑（从 switch-case 解耦）：支持循环、条件分支、跳转，而无需写复杂 if/switch。
+- **Middleware** 提供执行监管（框架级插针能力）：让开发者在每个关键点影响 agent 行为，而无需改动核心逻辑。
+
+三者组合让 Agent 更稳定、可生产化、易扩展、可观察、可控制、可插入人类审核、易于复用与组合。
+
+## 核心总结
+
+> 构建 AI Agents 的核心是：用 **State** 表示共享上下文，用 **Graph**（节点+边）实现状态驱动的控制流，用 **Middleware** 作为 hook 来注入治理规则；ReAct 只是图上的一个循环模式，本质是通过 State 不断累计 reasoning → action → observation。
+
+_Personal notes: to be added._

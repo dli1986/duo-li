@@ -53,6 +53,47 @@ manual).
   this until/unless a site section for it makes sense; noted here so it's
   not forgotten, not so it gets forced into Knowledge.
 
+## Migrated so far (2026-09-23 batch)
+
+Deliberately picked a *mix* across both categories and both `kind`s to prove
+the taxonomy works before migrating more — not the "best 4," just a
+representative spread:
+
+| Site slug | Source file (`PKG/...`) | `category` | `kind` |
+|---|---|---|---|
+| `agent-architecture-state-graph-middleware` | `Agent/LangChain  LangGraph Agents 全体系关键概念总结.md` | AI | concept |
+| `grpo-reasoning-vs-reward-shaping` | `Unsloth/GRPO Training Process Explained.md` | AI | concept |
+| `cpp-copy-move-semantics-leveldb` | `C++ interview & Knowledge/tour_of_cpp_ch4_6_copy_move_leveldb_notes.md` | Systems Engineering | concept |
+| `aix-linux-cross-platform-eval-order-bug` | `Development-troubleshooting/一次 AIX vs Linux 的跨平台调试经历...md` | Systems Engineering | article |
+
+Notes on how these were handled:
+
+- All four sourced from `PKG/`'s ChatGPT-conversation-shaped raw notes —
+  stripped the `source:`/M365-Copilot/ChatGPT frontmatter and any
+  "you said/as you noted" conversational framing, rewritten as
+  third-person reference material. This is a real editorial step, not
+  copy-paste — don't assume future migrations from this vault are
+  copy-paste-ready either.
+- `aix-linux-cross-platform-eval-order-bug` had internal jBASE-specific
+  class/function/macro names (e.g. an internal AST node type, an
+  internal macro for combining boolean results) — genericized those to
+  illustrative names while keeping the debugging narrative and the C++
+  standard's argument-evaluation-order point 100% faithful. The employer
+  product name itself never appeared in the note's visible body text, only
+  in an Obsidian wiki-link to a *different* note — dropped that link
+  entirely rather than publish it.
+- Explicitly did **not** migrate `RAG/RAG & Agentic RAG.md` in this batch
+  despite it having real value — it's raw scratch notes (bullet fragments,
+  broken `[[wiki-links]]` to notes that don't exist here, video links,
+  screenshot references) that would need a full rewrite, not a light edit.
+  Good candidate for a *later* batch once there's time to do it properly,
+  not a "confirm the pipeline works" candidate.
+- Everything currently tagged `LOW`/`SKIP` in the initial survey (link-dump
+  folders like `MCP/`, `BuildGPTFromScratch/`, `Machine Learning-Hung-yi
+  Lee/`, `C++ algo Resource/`; auto-scraped `AI_News/`; thin overviews like
+  `JAVA/`) is intentionally still unmigrated — no original synthesis to
+  publish, not worth forcing.
+
 `PKG-Wiki/` structured content, ready to migrate mechanically once reviewed:
 
 - `PKG-Wiki/concepts/` (legacy top-level location, pre-dates `wiki/`
