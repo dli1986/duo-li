@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ComingSoon } from "@/components/ComingSoon";
 import { getAllMusic } from "@/lib/music";
 import { musicCategories } from "@/lib/site";
+import { slugifyTag } from "@/lib/tags";
 
 export const metadata = { title: "Music — Duo Li" };
 
@@ -41,7 +42,7 @@ export default function MusicPage() {
               {entry.tags.map((tag) => (
                 <Link
                   key={tag}
-                  href={`/tags/${encodeURIComponent(tag)}`}
+                  href={`/tags/${slugifyTag(tag)}`}
                   className="rounded-full bg-black/[.05] px-3 py-1 text-xs text-zinc-600 hover:text-accent dark:bg-white/[.08] dark:text-zinc-300"
                 >
                   {tag}

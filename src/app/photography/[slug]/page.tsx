@@ -3,6 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { Prose } from "@/components/Prose";
 import { getAllPhotos, getPhotoBySlug } from "@/lib/photos";
+import { slugifyTag } from "@/lib/tags";
 
 export function generateStaticParams() {
   return getAllPhotos().map((photo) => ({ slug: photo.slug }));
@@ -64,7 +65,7 @@ export default async function PhotoPage({
         {photo.tags.map((tag) => (
           <Link
             key={tag}
-            href={`/tags/${encodeURIComponent(tag)}`}
+            href={`/tags/${slugifyTag(tag)}`}
             className="rounded-full bg-black/[.05] px-3 py-1 text-xs text-zinc-600 hover:text-accent dark:bg-white/[.08] dark:text-zinc-300"
           >
             {tag}

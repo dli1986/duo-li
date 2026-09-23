@@ -1,9 +1,9 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getAllTags, getItemsByTag } from "@/lib/tags";
+import { getAllTags, getItemsByTag, getTagBySlug } from "@/lib/tags";
 
 export function generateStaticParams() {
-  return getAllTags().map(({ tag }) => ({ tag }));
+  return getAllTags().map(({ slug }) => ({ tag: slug }));
 }
 
 export async function generateMetadata({
@@ -11,8 +11,8 @@ export async function generateMetadata({
 }: {
   params: Promise<{ tag: string }>;
 }) {
-  const { tag } = await params;
-  return { title: `#${tag} — Duo Li` };
+  const { tag: slug } = await params;
+  return { title: `#${getTagBySlug(slug) ?? slug} — Duo Li` };
 }
 
 export default async function TagPage({
@@ -20,16 +20,17 @@ export default async function TagPage({
 }: {
   params: Promise<{ tag: string }>;
 }) {
-  const { tag } = await params;
-  const items = getItemsByTag(tag);
+  const { tag: slug } = await params;
+  const items = getItemsByTag(slug);
+  const displayTag = getTagBySlug(slug);
 
-  if (items.length === 0) {
+  if (items.length === 0 || !displayTag) {
     notFound();
   }
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-16">
-      <h1 className="text-2xl font-semibold tracking-tight">#{tag}</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">#{displayTag}</h1>
 
       <ul className="mt-10 space-y-4">
         {items.map((item) => (

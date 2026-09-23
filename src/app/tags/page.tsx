@@ -17,10 +17,10 @@ export default function TagsPage() {
         <p className="mt-10 text-sm text-zinc-500">No tagged content yet.</p>
       ) : (
         <div className="mt-10 flex flex-wrap gap-2">
-          {tags.map(({ tag, count }) => (
+          {tags.map(({ tag, slug, count }) => (
             <Link
-              key={tag}
-              href={`/tags/${encodeURIComponent(tag)}`}
+              key={slug}
+              href={`/tags/${slug}`}
               className="rounded-full bg-black/[.05] px-3 py-1 text-sm text-zinc-600 hover:text-accent dark:bg-white/[.08] dark:text-zinc-300"
             >
               {tag} <span className="text-zinc-400">({count})</span>

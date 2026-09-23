@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Prose } from "@/components/Prose";
 import { getAllMusic, getMusicBySlug } from "@/lib/music";
+import { slugifyTag } from "@/lib/tags";
 
 export function generateStaticParams() {
   return getAllMusic().map((entry) => ({ slug: entry.slug }));
@@ -63,7 +64,7 @@ export default async function MusicEntryPage({
         {entry.tags.map((tag) => (
           <Link
             key={tag}
-            href={`/tags/${encodeURIComponent(tag)}`}
+            href={`/tags/${slugifyTag(tag)}`}
             className="rounded-full bg-black/[.05] px-3 py-1 text-xs text-zinc-600 hover:text-accent dark:bg-white/[.08] dark:text-zinc-300"
           >
             {tag}
