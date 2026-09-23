@@ -1,0 +1,208 @@
+---
+title: "NER 和 encoder-only 实例说明"
+slug: "ner-encoder-only"
+category: "AI"
+kind: "article"
+sourceType: "pkg-legacy"
+tags:
+  - "NER"
+  - "encoder-only"
+  - "transformers"
+summary: "从工程视角系统梳理 NER 的本质——token 级监督学习、标注如何把语义规则接入数学优化，以及 encoder-only Transformer 在 NER 微调中真正学到的是什么，以 openFDA 设备召回数据集为例。"
+createdAt: "2026-04-20"
+---
+
+> **目的**
+>
+> 本文用于系统性总结：
+>
+> - 什么是 NER
+> - NER 在 encoder-only Transformer 体系中的真实意义
+> - 为什么数据集 + 标注是 NER 的核心
+> - openFDA → Hugging Face NER 数据集是如何被构造的
+> - 模型"学会"的究竟是什么
+>
+> 本总结基于真实世界数据与实践，而非框架或 agent 抽象。
+
+参考资料：[Hugging Face 数据集](https://huggingface.co/datasets/mfarrington/biobert-ner-fda-recalls-dataset) · [openFDA recall data](https://open.fda.gov/apis/device/recall/) · [Doccano 标注工具](https://doccano.github.io/doccano/) · [原项目 GitHub](https://github.com/mmfarrington/devicebert-ner-project)
+
+## 1. NLP 的总体图景（从工程角度）
+
+### NLP 的核心目标是什么？
+
+**NLP 并不是"理解文本"，而是：**
+
+> 把非结构化文本，转化为可以被计算、查询、统计、建模的结构。
+
+在数据库/工程视角下：
+
+| 非结构化文本 | NLP 的产物 |
+| --- | --- |
+| 一段文字 | 向量 / 标签 / 结构化对象 |
+| 自由语言 | 可计算的 schema |
+| 人类描述 | 模型可优化的数学对象 |
+
+## 2. 什么是 NER（命名实体识别）
+
+### 2.1 NER 的严格定义
+
+> NER（Named Entity Recognition）是一种监督学习任务，其目标是：
+> 在给定的人类定义的实体空间中，对文本中的每一个 *token* 进行标签分配。
+
+形式化表示为：
+
+```text
+tokens:  x₁, x₂, x₃, …, xₙ
+labels:  y₁, y₂, y₃, …, yₙ
+```
+
+其中：
+
+- `xᵢ` = tokenizer 产生的 token
+- `yᵢ` = 来自预定义 label 集合的标签（如 B-DEVICE / I-DEVICE / O）
+
+⚠️ **关键点**：没有被清晰定义的 label 空间，就不存在真正意义上的 NER。
+
+## 3. Token、Tokenizer，不是"词"
+
+### 3.1 Tokenization 是什么？
+
+Tokenizer 的作用只是：
+
+- 把字符串拆分为 token（可能是 subword）
+- 映射到 embedding 索引
+
+示例：
+
+```text
+"Multi-Therapy Infusion Pump"
+→ ["Multi", "-", "Therapy", "Infusion", "Pump"]
+```
+
+✅ tokenizer **不具备任何医学/设备语义**
+
+### 3.2 为什么 NER 是 token-level，而不是词-level？
+
+因为：
+
+- Transformer 处理的是 **token embedding**
+- 子词拆分后，"词"不再是统一单位
+
+因此：标注必须对齐到 token，label 也是 token-level 的。
+
+## 4. Labeling（标注）—— NER 的真正核心
+
+### 4.1 标注做的不是"找关键词"
+
+标注的本质是：由人类在特定 domain 中，定义"哪些概念是重要的实体，并将这个判断写入数据"。
+
+### 4.2 以 FDA recall 为例
+
+原始文本：
+
+> "Baxter 6060 Multi-Therapy Infusion Pump is recalled…"
+
+人工标注：
+
+| Token | Label |
+| --- | --- |
+| Baxter | B-DEVICE |
+| 6060 | I-DEVICE |
+| Multi | I-DEVICE |
+| Therapy | I-DEVICE |
+| Infusion | I-DEVICE |
+| Pump | I-DEVICE |
+| is | O |
+
+✅ 这是**人类定义的规则**，不是模型发现的规律。
+
+## 5. `labels` 与 `ner_tags`：语义 → 数学的桥梁
+
+### 5.1 为什么 labels 不能直接参与训练？
+
+- `"B-DEVICE"` 是**符号**
+- 神经网络只能处理**数值**
+
+### 5.2 ner_tags 的意义
+
+```text
+"O" → 0
+"B-DEVICE" → 1
+"I-DEVICE" → 2
+```
+
+| Token | labels | ner_tags |
+| --- | --- | --- |
+| Pump | I-DEVICE | 2 |
+
+> `ner_tags` 是"人类语义规则进入数学优化过程的接口"。
+
+### 5.3 `-100` 是什么？
+
+在训练中，子词后续 token、padding、特殊 token 会被设置为：
+
+```text
+label = -100
+```
+
+含义是：该 token 不参与 loss 计算（ignore index）。
+
+## 6. Encoder-only Transformer 在 NER 中学到了什么？
+
+### 6.1 预训练阶段（BioBERT）
+
+- 目标：Masked Language Modeling
+- 学到：语言共现与上下文结构
+- ❌ 未学习任何 DEVICE 概念
+
+### 6.2 微调阶段（NER）
+
+通过 supervised learning，模型学习的是：
+
+$$
+P(\text{label} \mid \text{token embedding + context})
+$$
+
+换句话说：模型不是"认识设备"，而是学会在某种上下文分布下，这类 token 更可能被人标为 DEVICE。
+
+## 7. openFDA → Hugging Face NER 数据集是如何"做出来"的
+
+### 7.1 原始数据来源
+
+- openFDA device recall API
+- 提供：监管事实数据 + 自由文本（recall action summary）
+
+### 7.2 数据处理流程（核心）
+
+1. **数据采集** — 拉取 recall action 文本
+2. **数据清洗** — 去重、规范化
+3. **任务建模** — 明确定义：ENTITY = DEVICE
+4. **人工标注** — 使用 Doccano 框选设备名称
+5. **BIO 编码 + tokenizer 对齐**
+6. **生成训练数据** — `tokens` / `labels` / `ner_tags`
+
+## 8. 为什么这个 NER 是"成立的"
+
+因为在 **FDA recall domain** 中，"device" 是监管主体、可追责对象、核心语义单元。
+
+✅ entity 定义稳定　✅ NER 模型可学习　✅ 泛化在同域内是有意义的
+
+## 9. NER 的价值与边界
+
+### 9.1 NER 能做什么
+
+- 把文本映射到显式 schema
+- 提供结构化实体供搜索、分析、统计
+- 形成可复用的"领域感知模块"
+
+### 9.2 NER 不能做什么
+
+- ❌ 不保证跨 domain 泛化
+- ❌ 不推理世界知识
+- ❌ 不判断业务相关性
+
+> NER 的能力边界 = 数据集的语义边界
+
+## 10. 总结
+
+> NER 是一种监督结构学习任务：在人类定义好的实体空间中，通过 token-level 标注，训练 encoder-only Transformer 学会从上下文表示到标签概率的映射。数据集承载的是人类对世界的划分方式，而模型只是逼近它。

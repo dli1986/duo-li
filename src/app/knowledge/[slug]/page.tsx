@@ -47,7 +47,7 @@ export default async function KnowledgeEntryPage({
         {entry.tags.map((tag) => (
           <Link
             key={tag}
-            href={`/tags/${tag}`}
+            href={`/tags/${encodeURIComponent(tag)}`}
             className="rounded-full bg-black/[.05] px-3 py-1 text-xs text-zinc-600 hover:text-accent dark:bg-white/[.08] dark:text-zinc-300"
           >
             {tag}
