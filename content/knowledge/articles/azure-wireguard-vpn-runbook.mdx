@@ -1,0 +1,400 @@
+---
+title: "Azure VM + WireGuard VPN 实战归档：配置、排障与学习笔记"
+slug: "azure-wireguard-vpn-runbook"
+category: "Systems Engineering"
+kind: "article"
+sourceType: "pkg-legacy"
+tags:
+  - "Networking"
+  - "VPN"
+  - "Azure"
+  - "Linux"
+summary: "在 Azure VM 上从零搭建 WireGuard VPN 的完整实战记录：架构、计费与选型、NSG 防火墙规则、密钥体系、服务端/客户端配置、一次真实的“握手成功但没网络”故障排查（根因是 Linux FORWARD 链未放行），以及关键网络概念（NAT MASQUERADE、IP Forwarding、AllowedIPs/Endpoint）梳理。"
+createdAt: "2026-09-23"
+---
+
+> 目标：在 Azure VM 上搭建 WireGuard VPN，并从"能快速用起来"出发，逐步理解 Azure 使用、计费、Linux 网络、NAT、防火墙和 VPN 原理。
+
+## 0. 最终架构
+
+```text
+iPhone / iOS WireGuard Client
+        |
+        | UDP 51820
+        v
+Azure Public IP
+        |
+        v
+Azure NSG Inbound Rule: UDP 51820 Allow
+        |
+        v
+Ubuntu VM eth0: 10.0.0.4/24
+        |
+        v
+WireGuard wg0: 10.0.0.1/24
+        |
+        v
+iptables FORWARD + NAT MASQUERADE
+        |
+        v
+Internet
+```
+
+最终验证：Azure VM 创建成功；WireGuard 服务端启动成功；iPhone WireGuard 客户端 handshake 成功；修复 Linux FORWARD 链后，手机通过 VPN 正常访问互联网（访问 `https://ifconfig.me` 显示 Azure VM 公网 IP）。
+
+## 1. Azure 使用层理解
+
+**计费模型**：Azure VM 不是"包流量套餐"，而是按资源使用计费——主要费用来自 VM compute（CPU/内存），磁盘和公网出站流量也计费，但对普通 VPN 使用通常不是大头。以 `D2als_v7`（2 vCPU / 4GB RAM，约 $0.105/hour）为例：
+
+```text
+0.105 × 24 × 30 ≈ 75.6 USD/month
+
+VM Compute: 约 $76/month
+Disk: 约几美元/month
+Public IP / Network: 少量额外费用
+Total: 大约 $80+/month
+```
+
+**Region / SKU 选择经验**：某些区域（如 Japan East）B 系列 VM 可能不可用（即使选择 "No infrastructure redundancy"），D 系列可用但价格更高。策略：先用 D 系列跑起来，之后可以 Resize 到 B1s/B1ms，或换到价格更低的区域重建。如果只是跑 VPN，B1s/B1ms 已经足够；如果还想跑其他 service/cron/Docker，D 系列能发挥更多价值。
+
+## 2. 创建 Azure VM 时的关键选择
+
+```text
+Resource Group: vpn-rg
+Region: Japan East
+Image: Ubuntu Server 24.04 LTS
+Size: D2als_v7
+Authentication: SSH public key
+Inbound ports: SSH 22
+Spot VM: 不要启用
+```
+
+**为什么不建议 Spot VM**：Spot VM 可能被 Azure 随时回收，对 VPN 服务来说会导致随机断线、服务不稳定，不适合长期固定使用。
+
+**SSH key vs WireGuard key**：这是两套完全不同的密钥体系。SSH key 用于登录 VM 管理服务器（`你的电脑 Terminal → SSH → Azure VM`）；WireGuard 客户端配置用于建立 VPN 隧道（`iPhone WireGuard App → VPN Tunnel → Azure VM → Internet`），手机连 VPN 不需要 SSH key。
+
+## 3. Azure NSG 防火墙配置
+
+SSH 入站规则（创建时默认允许）：
+
+```text
+Port: 22, Protocol: TCP, Source: Any, Action: Allow
+```
+
+WireGuard 入站规则（需要手动添加，注意协议是 UDP 不是 TCP）：
+
+```text
+Name: wireguard
+Priority: 310
+Port: 51820
+Protocol: UDP
+Source: Any
+Action: Allow
+```
+
+## 4. SSH 登录 VM
+
+```bash
+chmod 400 ~/Downloads/vpn-vm_key.pem
+ssh -i ~/Downloads/vpn-vm_key.pem azureuser@<azure_public_ip>
+```
+
+## 5. WireGuard 服务端安装
+
+```bash
+sudo apt update
+sudo apt install -y wireguard qrencode iptables-persistent
+```
+
+`wireguard` 是 VPN 核心组件，`qrencode` 用于生成 iPhone 可扫描的二维码，`iptables-persistent` 用于持久化防火墙规则。
+
+## 6. 生成服务端密钥
+
+```bash
+cd ~
+umask 077
+wg genkey | tee privatekey | wg pubkey > publickey
+```
+
+服务端这对 key 不带 `server_` 前缀，也不带 `.key` 后缀——这是 `wg genkey`/`wg pubkey` 最原始的命名习惯，和客户端 key 特意加 `client_` 前缀区分开。`privatekey` 放入服务端 `[Interface] PrivateKey`；`publickey` 放入手机客户端 `[Peer] PublicKey`。private key 不应该公开，public key 可以放到 peer 配置中。
+
+## 7. 生成客户端密钥
+
+```bash
+wg genkey | tee client_private.key | wg pubkey > client_public.key
+```
+
+`client_private.key` 放入手机客户端 `[Interface] PrivateKey`；`client_public.key` 放入服务端 `[Peer] PublicKey`。
+
+## 8. 配置 WireGuard 服务端
+
+```bash
+sudo nano /etc/wireguard/wg0.conf
+```
+
+```ini
+[Interface]
+# 服务端 WireGuard 私钥
+PrivateKey = <server_private_key>
+
+# 服务端在 VPN 内部网络中的地址（手机客户端会使用 10.0.0.2）
+Address = 10.0.0.1/24
+
+# WireGuard 服务监听端口，Azure NSG 也必须开放 UDP 51820
+ListenPort = 51820
+
+# 开启 Linux IPv4 转发
+PostUp = sysctl -w net.ipv4.ip_forward=1
+
+# 允许从 wg0 进入的流量被 Linux 转发（本次 troubleshooting 的关键修复点之一）
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT
+
+# 允许发往 wg0 的返回流量被 Linux 转发
+# 没有这一条时，可能出现 VPN handshake 成功但手机没网络
+PostUp = iptables -A FORWARD -o wg0 -j ACCEPT
+
+# NAT 出口转换：eth0 是 Azure VM 的主网卡
+# 让 10.0.0.0/24 的 VPN 内网流量可以通过 VM 访问互联网
+PostUp = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
+PostDown = iptables -D FORWARD -o wg0 -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+[Peer]
+# iPhone / 客户端 WireGuard 公钥
+PublicKey = <client_public_key>
+
+# 这个客户端在 VPN 内部网络中的地址
+# 注意：服务端这里必须是 /32，表示只匹配这个 peer
+AllowedIPs = 10.0.0.2/32
+```
+
+## 9. 启动 WireGuard 服务
+
+```bash
+sudo systemctl enable wg-quick@wg0
+sudo systemctl start wg-quick@wg0
+sudo systemctl status wg-quick@wg0
+```
+
+## 10. 开启并永久保存 IP Forwarding
+
+`PostUp` 里已经临时执行了 `sysctl -w net.ipv4.ip_forward=1`，但建议永久写入系统配置：
+
+```bash
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+sysctl net.ipv4.ip_forward   # 期望输出 net.ipv4.ip_forward = 1
+```
+
+## 11. 持久化 iptables 规则
+
+规则已经写入 `wg0.conf` 的 `PostUp`/`PostDown`，WireGuard 启动时会自动添加；仍然可以额外保存当前规则：
+
+```bash
+sudo netfilter-persistent save
+sudo iptables -t nat -L -n -v   # 期望看到 MASQUERADE ... eth0
+sudo iptables -L FORWARD -n -v  # 期望看到 ACCEPT ... wg0
+```
+
+## 12. 生成 iPhone WireGuard 客户端配置
+
+```bash
+cat client_private.key   # → 客户端 [Interface] PrivateKey
+cat publickey            # → 客户端 [Peer] PublicKey
+curl ifconfig.me          # → Azure VM 公网 IP，即客户端 Endpoint
+```
+
+```ini
+[Interface]
+PrivateKey = <client_private_key>
+# iPhone 在 VPN 内部网络中的地址，要和服务端 Peer AllowedIPs 对应
+Address = 10.0.0.2/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = <server_public_key>
+# Azure VM 公网 IP + WireGuard UDP 端口（不是 10.0.0.4 这种内网 IP）
+Endpoint = <azure_public_ip>:51820
+# 所有 IPv4 流量都走 VPN（全局 VPN 的关键配置）
+AllowedIPs = 0.0.0.0/0
+# 保持 NAT 后的移动网络连接稳定
+PersistentKeepalive = 25
+```
+
+如果想同时接管 IPv6 流量：`AllowedIPs = 0.0.0.0/0, ::/0`。
+
+## 13. 生成二维码供 iPhone 扫描
+
+```bash
+CLIENT_PRIVATE_KEY=$(cat client_private.key)
+SERVER_PUBLIC_KEY=$(cat publickey)
+SERVER_PUBLIC_IP=$(curl -s ifconfig.me)
+
+cat <<EOF > client-ios.conf
+[Interface]
+PrivateKey = ${CLIENT_PRIVATE_KEY}
+Address = 10.0.0.2/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = ${SERVER_PUBLIC_KEY}
+Endpoint = ${SERVER_PUBLIC_IP}:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+
+qrencode -t ansiutf8 < client-ios.conf
+```
+
+iPhone 端：安装 WireGuard App → `Add Tunnel` → `Scan from QR code` → 扫描终端二维码 → 启用 VPN。
+
+## 14. 验证 WireGuard 连接
+
+服务端查看状态：
+
+```bash
+sudo wg
+```
+
+成功时类似：
+
+```text
+interface: wg0
+  public key: <server_public_key>
+  listening port: 51820
+
+peer: <client_public_key>
+  endpoint: <client_public_ip>:<random_port>
+  allowed ips: 10.0.0.2/32
+  latest handshake: 48 seconds ago
+  transfer: 97.81 KiB received, 2.04 KiB sent
+```
+
+`latest handshake` 说明客户端和服务端已建立握手；`transfer received` 是服务端收到的流量，`sent` 是服务端返回的流量——**如果 received 增长明显但 sent 很少，通常说明返回流量被防火墙或转发规则阻断**（这正是下面第 15 节遇到的问题）。VM 自身用 `curl ifconfig.me` 应显示 Azure 公网 IP；手机端打开 `https://ifconfig.me` 也应显示同一个 IP。
+
+## 15. 一次真实的 Troubleshooting 全记录
+
+**初始症状**：iPhone 打开 VPN 后显示连接成功，但无法访问互联网，打不开 `https://ifconfig.me`。
+
+排查步骤：
+1. **Azure NSG 检查** —— 确认 `UDP 51820 Allow, Source: Any`，入站规则没问题。
+2. **Linux IP Forwarding 检查** —— `sysctl net.ipv4.ip_forward` 输出 `= 1`，已开启。
+3. **NAT 检查** —— `iptables -t nat -L -n -v` 存在 `MASQUERADE ... eth0`，NAT 已存在。
+4. **网卡检查** —— `ip a` 确认 `eth0: 10.0.0.4/24`、`wg0: 10.0.0.1/24`，NAT 里 `-o eth0` 是对的。
+5. **WireGuard handshake 检查** —— `sudo wg` 显示 `latest handshake` 正常，但 `received` 远大于 `sent`：客户端能连到服务端，但服务端返回客户端的数据很少——问题不在 Azure 入站、不在客户端 endpoint、不在 WireGuard 基础握手。
+
+**根因**：Linux **FORWARD 链**没有显式允许 `wg0` 流量转发——客户端流量进入 `wg0` 后，Linux 没有正确允许转发，导致返回流量异常。
+
+**修复**：
+
+```bash
+sudo iptables -A FORWARD -i wg0 -j ACCEPT
+sudo iptables -A FORWARD -o wg0 -j ACCEPT
+sudo systemctl restart wg-quick@wg0
+```
+
+修复后手机 VPN 正常访问互联网。**长期修复**是把这两条规则写入 `wg0.conf` 的 `PostUp`/`PostDown`（已体现在第 8 节的配置模板中）。
+
+## 16. 关键概念解释
+
+- **`Address`**（客户端 `10.0.0.2/24`）：给设备分配一个 VPN 内部 IP，不能写成 `0.0.0.0`。
+- **`AllowedIPs`**：客户端 `0.0.0.0/0` 表示所有 IPv4 流量都走 VPN；服务端 `10.0.0.2/32` 表示这个 peer 对应的客户端 VPN IP。
+- **`Endpoint`**：客户端要连接的 WireGuard 服务端**公网**地址，必须是 Azure VM 公网 IP，不是内网 IP。
+- **IP Forwarding**：Linux 默认不是路由器，开启 `net.ipv4.ip_forward = 1` 后才能把来自 `wg0` 的流量转发到 `eth0`。
+- **NAT MASQUERADE**（`iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE`）：把来自 VPN 内网 `10.0.0.0/24` 的流量伪装成 Azure VM `eth0` 的地址出站，否则互联网不知道如何把返回流量送回 `10.0.0.2`。
+- **FORWARD Chain**（`iptables -A FORWARD -i wg0 -j ACCEPT` / `-o wg0 -j ACCEPT`）：允许 Linux 在 `wg0` 和 `eth0` 之间转发数据包——本次问题就出在这里缺失。
+
+## 17. 多客户端扩展
+
+新增一台设备（如 iPad）：生成独立密钥对 → 服务端加一个 `[Peer]`（独立 `AllowedIPs`，如 `10.0.0.3/32`）→ 重启服务 → 客户端配置对应的 `Address`（如 `10.0.0.3/24`）。每个客户端必须有独立的 private/public key、独立 VPN IP、服务端一个独立 `[Peer]`。
+
+## 18. 常用管理命令
+
+```bash
+sudo wg                              # 查看 WireGuard 状态
+sudo systemctl status wg-quick@wg0   # 查看 systemd 服务状态
+sudo systemctl start wg-quick@wg0
+sudo systemctl stop wg-quick@wg0
+sudo systemctl restart wg-quick@wg0
+sudo systemctl enable wg-quick@wg0   # 开机自启
+sudo iptables -t nat -L -n -v        # 查看 NAT 规则
+sudo iptables -L FORWARD -n -v       # 查看 FORWARD 规则
+ip a                                  # 查看 IP 地址和网卡
+curl ifconfig.me                      # 查看公网 IP
+```
+
+## 19. 未来优化方向
+
+- **降低成本**：Resize 到 B1s/B1ms，或换到价格更低的区域（Southeast Asia / East Asia / Korea Central）。
+- **固定 Public IP**：确认 Public IP 为 Static，否则 VM deallocate 后 IP 可能变化，客户端 `Endpoint` 会失效。
+- **自动化部署**：把整套步骤写成 `setup_wireguard.sh`，进一步可以用 Terraform + cloud-init 实现一键创建 VM + 一键部署 WireGuard。
+- **值得深入的方向**：TLS/SSL 基础、WireGuard Noise Protocol、VPN tunnel 与 routing table、iptables/nftables、NAT/conntrack、Azure VNet/Subnet/NSG、tcpdump 抓包分析、split tunnel vs full tunnel、多 peer 管理。
+
+## 20. 最小可复现快速命令版
+
+> 从一台全新 Ubuntu VM 到 iPhone 可用 WireGuard 的最短路径。执行前需要 Azure NSG 已开放 UDP 51820。
+
+```bash
+sudo apt update
+sudo apt install -y wireguard qrencode iptables-persistent
+
+cd ~
+umask 077
+wg genkey | tee server_private.key | wg pubkey > server_public.key
+wg genkey | tee client_private.key | wg pubkey > client_public.key
+
+SERVER_PRIVATE_KEY=$(cat server_private.key)
+CLIENT_PUBLIC_KEY=$(cat client_public.key)
+
+sudo bash -c "cat > /etc/wireguard/wg0.conf" <<EOF
+[Interface]
+PrivateKey = ${SERVER_PRIVATE_KEY}
+Address = 10.0.0.1/24
+ListenPort = 51820
+PostUp = sysctl -w net.ipv4.ip_forward=1
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT
+PostUp = iptables -A FORWARD -o wg0 -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
+PostDown = iptables -D FORWARD -o wg0 -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+[Peer]
+PublicKey = ${CLIENT_PUBLIC_KEY}
+AllowedIPs = 10.0.0.2/32
+EOF
+
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+sudo systemctl enable wg-quick@wg0
+sudo systemctl start wg-quick@wg0
+
+CLIENT_PRIVATE_KEY=$(cat client_private.key)
+SERVER_PUBLIC_KEY=$(cat server_public.key)
+SERVER_PUBLIC_IP=$(curl -s ifconfig.me)
+
+cat <<EOF > client-ios.conf
+[Interface]
+PrivateKey = ${CLIENT_PRIVATE_KEY}
+Address = 10.0.0.2/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = ${SERVER_PUBLIC_KEY}
+Endpoint = ${SERVER_PUBLIC_IP}:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+
+qrencode -t ansiutf8 < client-ios.conf
+```
+
+然后用 iPhone WireGuard App 扫描二维码。
+
+## 21. 一句话总结
+
+这次不是简单"搭 VPN"，而是完整经历了：Azure subscription/credits → VM sizing/cost tradeoff → Azure NSG → SSH key management → WireGuard peer model → Linux IP forwarding → iptables NAT → FORWARD chain troubleshooting → iOS client full-tunnel routing。这是一套非常适合深入理解云、网络、安全和系统工程的实践入口。
+
+_Personal notes: to be added._
