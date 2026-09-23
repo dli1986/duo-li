@@ -48,6 +48,7 @@ char* get_data(offset_t data_offset) {
 下面是对原始设计稿（`bptree_with_bitmap_mermaid.html`）的忠实复刻——保留原图的三栏布局、配色和文字内容：左栏是**这次进程里的虚拟内存视角**，右栏是**磁盘上的文件布局视角**，中间栏说明两者为什么是"同一份数据"。
 
 <div className="not-prose overflow-x-auto rounded-lg border-[3px] border-[#2c3e50] bg-white p-5 font-mono text-[#2c3e50]">
+<div className="min-w-[1100px]">
   <div className="border-b-[3px] border-[#34495e] pb-2.5 text-center text-xl font-bold text-[#2c3e50]">
     B+ Tree Memory-Mapped Architecture: Virtual Memory ↔ File Layout Mapping
   </div>
@@ -358,6 +359,7 @@ char* get_data(offset_t data_offset) {
     3. <strong>Efficient Navigation:</strong> Child access = simple pointer arithmetic<br />
     4. <strong>Separated Storage:</strong> Tree structure and data stored independently for optimal layout
   </div>
+</div>
 </div>
 
 *以上是原始 HTML 草图（`bptree_with_bitmap_mermaid.html`，2026 年 7 月 1 日）的逐字段复刻——配色、分栏结构、每个 offset 数值都与原稿一致，只是从独立 HTML 文件迁移成了页面内嵌的组件。下面几节是在这份原始素材基础上重新组织的文字讲解，两者互补：这一节负责"一眼看全貌"，下面负责"讲清楚为什么"。*
