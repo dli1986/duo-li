@@ -5,7 +5,11 @@ import { knowledgeCategories } from "@/lib/site";
 
 export const metadata = { title: "Knowledge — Duo Li" };
 
-export default function KnowledgePage() {
+export default async function KnowledgePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ category?: string }>;
+}) {
   const entries = getAllKnowledge();
 
   if (entries.length === 0) {
@@ -19,11 +23,16 @@ export default function KnowledgePage() {
     );
   }
 
+  const { category: activeCategory } = await searchParams;
+
   // group by the site's known category order first, then any custom categories found in content
-  const usedCategories = [
+  const allCategories = [
     ...knowledgeCategories.filter((c) => entries.some((e) => e.category === c)),
     ...[...new Set(entries.map((e) => e.category))].filter((c) => !knowledgeCategories.includes(c)),
   ];
+  const usedCategories = activeCategory
+    ? allCategories.filter((c) => c === activeCategory)
+    : allCategories;
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-16">
@@ -31,6 +40,32 @@ export default function KnowledgePage() {
       <p className="mt-2 text-zinc-600 dark:text-zinc-400">
         Structured, evergreen technical knowledge base.
       </p>
+
+      <div className="mt-6 flex flex-wrap gap-2">
+        <Link
+          href="/knowledge"
+          className={`rounded-full px-3 py-1 text-sm ${
+            !activeCategory
+              ? "bg-accent text-white"
+              : "bg-black/[.05] text-zinc-600 hover:text-accent dark:bg-white/[.08] dark:text-zinc-300"
+          }`}
+        >
+          All
+        </Link>
+        {allCategories.map((category) => (
+          <Link
+            key={category}
+            href={`/knowledge?category=${encodeURIComponent(category)}`}
+            className={`rounded-full px-3 py-1 text-sm ${
+              activeCategory === category
+                ? "bg-accent text-white"
+                : "bg-black/[.05] text-zinc-600 hover:text-accent dark:bg-white/[.08] dark:text-zinc-300"
+            }`}
+          >
+            {category}
+          </Link>
+        ))}
+      </div>
 
       {usedCategories.map((category) => (
         <section key={category} className="mt-12 first:mt-10">
