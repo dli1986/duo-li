@@ -7,11 +7,12 @@ Before making implementation decisions read:
 2. spec.md
 3. architecture.md
 4. content-model.md
-5. roadmap.md
-6. design-system.md
-7. homepage-wireframe.md
-8. navigation.md
-9. digital-legacy.md
+5. knowledge-architecture.md (Knowledge module's kind/sourceType taxonomy + the two-vault content migration plan)
+6. roadmap.md
+7. design-system.md
+8. homepage-wireframe.md
+9. navigation.md
+10. digital-legacy.md
 
 Important:
 

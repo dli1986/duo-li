@@ -65,16 +65,10 @@ export const aboutBio = {
     "This website is a long-term archive of projects, knowledge, photographs, music collections and life experiences.",
 };
 
-export const knowledgeCategories = [
-  "AI",
-  "Agent Runtime",
-  "Speech",
-  "System Programming",
-  "Linux",
-  "Databases",
-  "Career",
-  "Productivity",
-];
+// Deliberately just 2 top-level buckets (systems engineer background: AI work vs.
+// everything-else engineering). Finer-grained topics (Python, PyTorch, C++, Linux,
+// Databases, Agent Runtime, Speech, ...) live in `tags`, not as more categories here.
+export const knowledgeCategories = ["AI", "Systems Engineering"];
 
 export const photographyCategories = [
   "Lithuania",

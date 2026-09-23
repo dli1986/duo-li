@@ -36,6 +36,14 @@ export default async function KnowledgeEntryPage({
       <p className="mt-3 text-zinc-600 dark:text-zinc-400">{entry.summary}</p>
 
       <div className="mt-4 flex flex-wrap gap-2">
+        <span className="rounded-full bg-black/[.05] px-3 py-1 text-xs text-zinc-600 dark:bg-white/[.08] dark:text-zinc-300">
+          {entry.kind}
+        </span>
+        {entry.lens && (
+          <span className="rounded-full bg-black/[.05] px-3 py-1 text-xs text-zinc-600 dark:bg-white/[.08] dark:text-zinc-300">
+            lens: {entry.lens}
+          </span>
+        )}
         {entry.tags.map((tag) => (
           <Link
             key={tag}

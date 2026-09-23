@@ -1,9 +1,15 @@
 import { readMdxCollection } from "./mdx-collection";
 
+export type KnowledgeKind = "concept" | "entity" | "example" | "synthesis" | "article";
+export type KnowledgeSourceType = "pkg-wiki" | "capture" | "pkg-legacy" | "manual";
+
 export interface KnowledgeFrontmatter {
   title: string;
   slug: string;
   category: string;
+  kind: KnowledgeKind;
+  sourceType?: KnowledgeSourceType;
+  lens?: string; // only meaningful when kind === "example" (capture-skill domain lens)
   tags: string[];
   summary: string;
   createdAt: string;

@@ -42,9 +42,14 @@ export default function KnowledgePage() {
               .filter((entry) => entry.category === category)
               .map((entry) => (
                 <li key={entry.slug} className="border-b border-black/[.06] pb-8 dark:border-white/[.08]">
-                  <Link href={`/knowledge/${entry.slug}`} className="text-lg font-medium hover:text-accent">
-                    {entry.title}
-                  </Link>
+                  <div className="flex items-center gap-2">
+                    <Link href={`/knowledge/${entry.slug}`} className="text-lg font-medium hover:text-accent">
+                      {entry.title}
+                    </Link>
+                    <span className="rounded-full bg-black/[.05] px-2 py-0.5 text-xs text-zinc-500 dark:bg-white/[.08] dark:text-zinc-400">
+                      {entry.kind}
+                    </span>
+                  </div>
                   <p className="mt-2 text-zinc-700 dark:text-zinc-300">{entry.summary}</p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     {entry.tags.map((tag) => (

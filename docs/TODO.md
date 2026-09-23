@@ -40,7 +40,7 @@ Living status doc — what's actually live, what's designed-but-not-built, and w
 2. **Photography module — resolved, not blocked.** Cloudflare R2 dashboard access was not blocked (different risk category than Tailscale/Cloudflare Tunnel — plain HTTPS S3-compatible API calls, no tunnel software). Bucket `duo-li-media` created, public dev URL enabled, first real photo (`gan-hai`) uploaded and live end-to-end.
 3. **Custom domain** — deferred, not urgent, revisit whenever the user wants.
 4. **Career page** — waiting on the user's real work history; don't fabricate.
-5. **PKG/PKG-Wiki → Knowledge pipeline** — deliberately manual/curated, one article at a time. Not automating this (see session notes on why: confidence score ≠ safe-to-publish).
+5. **PKG/PKG-Wiki → Knowledge pipeline** — deliberately manual/curated, one article at a time. Not automating this (see session notes on why: confidence score ≠ safe-to-publish). Full taxonomy (`kind`: concept/entity/example/synthesis/article, `sourceType`: pkg-wiki/capture/pkg-legacy/manual) and the broader two-vault content inventory now live in `docs/knowledge-architecture.md` — read that before migrating anything else in. It also flags `PKG/Resume/` as the likely real-data source to eventually unblock the Career module (see #4).
 
 ## Next candidate entry points (pick one, don't guess which)
 
