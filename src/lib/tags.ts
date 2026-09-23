@@ -12,20 +12,27 @@ export interface TaggedItem {
   tags: string[];
 }
 
-// Tag text can contain characters (+, #, &, spaces) that some CDNs/edge routers
-// mishandle in a URL path even when percent-encoded (e.g. "+" has a legacy
-// "means space" meaning outside query strings on some platforms). Routing by a
-// plain ASCII-safe slug instead sidesteps that entirely — Unicode (e.g. CJK
-// tags) is left as-is since that percent-encodes unambiguously everywhere.
+// Tag text can contain characters that break as a URL path segment on Vercel's
+// static hosting specifically: "+"/space have legacy form-encoding ambiguity
+// even when percent-encoded, and (confirmed by testing) non-ASCII segments
+// (e.g. CJK tags like "国语") 404 on Vercel's prerendered static routes even
+// though they build fine locally and percent-encode unambiguously per spec.
+// Routing by a guaranteed-pure-ASCII slug sidesteps both problems.
 const SYMBOL_WORDS: Record<string, string> = { "+": "p", "#": "sharp", "&": "and" };
 
 export function slugifyTag(tag: string): string {
   const substituted = tag.replace(/[+#&]/g, (ch) => SYMBOL_WORDS[ch] ?? "");
-  return substituted
+  const asciiSlug = substituted
     .trim()
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .toLowerCase();
+
+  if (asciiSlug) return asciiSlug;
+
+  // Nothing ASCII survived (e.g. a pure-CJK tag) — fall back to a hex-encoded
+  // UTF-8 byte string. Not pretty, but guaranteed to be a plain ASCII segment.
+  return Buffer.from(tag, "utf8").toString("hex");
 }
 
 function collectTaggedItems(): TaggedItem[] {
