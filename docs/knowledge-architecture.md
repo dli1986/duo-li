@@ -28,7 +28,8 @@ manual).
 
 `PKG/` topic folders, roughly bucketed by where they'd eventually land:
 
-- **Knowledge-shaped** (technical, evergreen): `C++ interview & Knowledge/`,
+- **Knowledge-shaped** (technical, evergreen): `C++ interview & Knowledge/`
+  (fully migrated as of 2026-09-23, see batch table below — 13 entries),
   `Deep Learning-Mu Li/`, `Machine Learning-Hung-yi Lee/`,
   `BuildGPTFromScratch/`, `RAG/`, `MCP/`, `Unsloth/`, `OpenTelemetry/`,
   `D3ToJBASE/`, `JBASE/`, `JAVA/`, `AI_News/`, `Developer API Key Calling/`,
@@ -65,6 +66,7 @@ representative spread:
 | `grpo-reasoning-vs-reward-shaping` | `Unsloth/GRPO Training Process Explained.md` | AI | concept |
 | `cpp-copy-move-semantics-leveldb` | `C++ interview & Knowledge/tour_of_cpp_ch4_6_copy_move_leveldb_notes.md` | Systems Engineering | concept |
 | `aix-linux-cross-platform-eval-order-bug` | `Development-troubleshooting/一次 AIX vs Linux 的跨平台调试经历...md` | Systems Engineering | article |
+| `azure-wireguard-vpn-runbook` | `AzureConfigureWireGuard/azure_wireguard_vpn_full_runbook.md` | Systems Engineering | article |
 
 Notes on how these were handled:
 
@@ -93,6 +95,64 @@ Notes on how these were handled:
   Lee/`, `C++ algo Resource/`; auto-scraped `AI_News/`; thin overviews like
   `JAVA/`) is intentionally still unmigrated — no original synthesis to
   publish, not worth forcing.
+
+## `C++ interview & Knowledge/` full folder migration (2026-09-23 batch)
+
+Per explicit instruction, migrated *every* remaining file in this folder
+(not a selective pick like the general `PKG/` batch above) — 12 new entries,
+plus the 1 (`cpp-copy-move-semantics-leveldb`) already migrated earlier:
+
+| Site slug | Source file | `category` | `kind` |
+|---|---|---|---|
+| `cpp-abstract-classes-container` | `a_tour_cpp_abstract_classes_notes.md` | Systems Engineering | concept |
+| `cpp-concrete-class-vector-container` | `a_tour_cpp_container_notes.md` | Systems Engineering | concept |
+| `cpp-virtual-functions-unique-ptr` | `a_tour_cpp_virtual_functions_unique_ptr_model.md` | Systems Engineering | concept |
+| `cpp-concrete-class-leveldb-slice-inline` | `C++ concrete class.md` | Systems Engineering | concept |
+| `cpp-class-invariant-vec-leveldb-status` | `C++ invariant(leveldb+a tour of c++).md` | Systems Engineering | concept |
+| `cpp-static-cast-vs-dynamic-cast` | `static_cast & dynamic_cast.md` | Systems Engineering | concept |
+| `cpp-class-hierarchy-progression` | `tour_of_cpp_ch4_5_class_hierarchy_notes.md` | Systems Engineering | concept |
+| `cpp-default-explicit-leveldb-slice` | `tour_of_cpp_ch4_6_3_cpp_leveldb_slice_default_explicit_notes.md` | Systems Engineering | concept |
+| `cpp-raii-ownership-graph-leveldb` | `tour_of_cpp_ch4_6_4_raii_ownership_graph_leveldb_study_notes.md` | Systems Engineering | article |
+| `cpp-move-semantics-operator-plus` | `tour_of_cpp_ch4_6_operator_plus_move_notes.md` | Systems Engineering | concept |
+| `cpp-templates-value-parameters-adl` | `tour_of_cpp_ch5_2_template_value_parameter.md` | Systems Engineering | concept |
+| `cpp-interview-prep-roadmap` | `C++ Interview Prep Plan.md` + `C++ Interview Prep Resources.md` + `Performance Tunning Tools C++/1. Common questions.md` (merged) | Systems Engineering | article |
+| `cpp-buddy-allocator-page-fault-case-study` | `Performance Tunning Tools C++/3. Tool list.md` + 3 HTML AI-visualization files + `Resume/buddy.cpp` (synthesized) | Systems Engineering | article |
+
+Notes specific to this batch:
+
+- Several source files (`C++ concrete class.md`, `C++ invariant(leveldb+a
+  tour of c++).md`) were written in a conversational Q&A format ("你说" /
+  "Copilot said") with a `source:` frontmatter field containing a work
+  email in the URL query string — both rewritten to third-person prose,
+  `source:` field dropped entirely.
+- `C++ concrete class.md` had a large embedded base64 PNG diagram — not
+  re-embedded; the diagram's content (inline linkage, `operator==` as
+  non-member vs `Slice::compare` as member) is fully covered in prose
+  instead.
+- Several files (`static_cast & dynamic_cast.md`, `tour_of_cpp_ch4_6_...`
+  notes) had minor malformed trailing code-fence artifacts or a stray
+  internal `[[wiki-link]]` line — cleaned up during rewrite, no content
+  lost.
+- The "broken link" `obsidian://` URIs the user flagged in this folder
+  (pointing to 3 HTML AI-generated page-fault/virtual-memory
+  visualizations, plus `Resume/buddy.cpp`) were **not actually broken** —
+  they're Obsidian's internal vault-open URI scheme, which only resolves
+  inside the Obsidian app. All 4 referenced files exist on disk and were
+  read directly; their technical content (buddy allocator fragmentation →
+  page fault storm, ~74% perf regression, concrete before/after numbers)
+  is now folded into `cpp-buddy-allocator-page-fault-case-study`.
+- `Resume/buddy.cpp` referenced real internal database-engine function
+  names (`jbase_getdp`, `AddKey`, `CompareRecord`, `listsort`) and a "jQL"
+  comment — genericized to illustrative equivalents
+  (`GetDataPointer`/`FindRecord`, `InsertRecord`, `CompareRecords`,
+  `SortRecords`) in the published case study; the underlying performance
+  diagnosis (page-fault count, memory footprint, runtime numbers) is
+  preserved faithfully.
+- `C++ Interview Prep Plan.md`, `C++ Interview Prep Resources.md`, and
+  `Performance Tunning Tools C++/1. Common questions.md` were merged into
+  a single `cpp-interview-prep-roadmap` article rather than published as
+  3 thin separate entries — they were short, overlapping in purpose
+  (all "how to prepare"), and read better combined.
 
 `PKG-Wiki/` structured content, ready to migrate mechanically once reviewed:
 
