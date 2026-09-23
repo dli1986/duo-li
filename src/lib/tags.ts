@@ -1,9 +1,10 @@
 import { getAllKnowledge } from "./knowledge";
 import { getAllMusic } from "./music";
 import { getAllNotes } from "./notes";
+import { getAllPhotos } from "./photos";
 import { getAllReading } from "./reading";
 
-export type TaggedKind = "knowledge" | "note" | "reading" | "music";
+export type TaggedKind = "knowledge" | "note" | "reading" | "music" | "photo";
 
 export interface TaggedItem {
   kind: TaggedKind;
@@ -64,7 +65,14 @@ function collectTaggedItems(): TaggedItem[] {
     tags: m.tags,
   }));
 
-  return [...knowledge, ...notes, ...reading, ...music];
+  const photos: TaggedItem[] = getAllPhotos().map((p) => ({
+    kind: "photo",
+    title: p.title,
+    href: `/photography/${p.slug}`,
+    tags: p.tags,
+  }));
+
+  return [...knowledge, ...notes, ...reading, ...music, ...photos];
 }
 
 export function getAllTags(): { tag: string; slug: string; count: number }[] {
