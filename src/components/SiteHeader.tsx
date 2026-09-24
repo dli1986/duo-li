@@ -25,8 +25,8 @@ export function SiteHeader() {
         <MusicPlayerBar />
       </div>
       {/* Header has no room for the player below lg — give it its own row instead of hiding it. */}
-      <div className="border-t border-black/[.06] px-6 py-2 lg:hidden dark:border-white/[.08]">
-        <MusicPlayerBar />
+      <div className="flex border-t border-black/[.06] px-6 py-2 lg:hidden dark:border-white/[.08]">
+        <MusicPlayerBar className="ml-auto" />
       </div>
     </header>
   );
