@@ -24,6 +24,10 @@ export function SiteHeader() {
       <div className="absolute top-1/2 right-6 hidden -translate-y-1/2 lg:block">
         <MusicPlayerBar />
       </div>
+      {/* Header has no room for the player below lg — give it its own row instead of hiding it. */}
+      <div className="border-t border-black/[.06] px-6 py-2 lg:hidden dark:border-white/[.08]">
+        <MusicPlayerBar />
+      </div>
     </header>
   );
 }

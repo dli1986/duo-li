@@ -89,7 +89,7 @@ export function MusicPlayerBar() {
   if (playlist.length === 0) return null;
 
   return (
-    <div className="flex items-center gap-0.5 rounded-full bg-black/[.04] py-1 pl-1 pr-3 dark:bg-white/[.06]">
+    <div className="inline-flex items-center gap-0.5 rounded-full bg-black/[.04] py-1 pl-1 pr-3 dark:bg-white/[.06]">
       <button
         onClick={toggleShuffle}
         aria-label="Toggle shuffle"
