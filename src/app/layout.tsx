@@ -4,6 +4,9 @@ import "./globals.css";
 import { SiteHeader } from "@/components/SiteHeader";
 import { SiteFooter } from "@/components/SiteFooter";
 import { BgmPlayer } from "@/components/BgmPlayer";
+import { MusicPlayerProvider } from "@/components/MusicPlayerProvider";
+import { MusicPlayerBar } from "@/components/MusicPlayerBar";
+import { getAllMusic } from "@/lib/music";
 import { siteConfig } from "@/lib/site";
 
 const geistSans = Geist({
@@ -22,17 +25,29 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
+  const musicPlaylist = getAllMusic()
+    .filter((entry) => entry.audioUrl)
+    .map((entry) => ({
+      slug: entry.slug,
+      title: entry.title,
+      artist: entry.artist,
+      audioUrl: entry.audioUrl as string,
+    }));
+
   return (
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-background text-foreground font-sans">
-        <SiteHeader />
-        <main className="flex-1" data-pagefind-body>
-          {children}
-        </main>
-        <SiteFooter />
+        <MusicPlayerProvider playlist={musicPlaylist}>
+          <SiteHeader />
+          <main className="flex-1 pb-16" data-pagefind-body>
+            {children}
+          </main>
+          <SiteFooter />
+          <MusicPlayerBar />
+        </MusicPlayerProvider>
         <BgmPlayer />
       </body>
     </html>

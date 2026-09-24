@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Prose } from "@/components/Prose";
+import { MusicPlayButton } from "@/components/MusicPlayButton";
 import { getAllMusic, getMusicBySlug } from "@/lib/music";
 import { slugifyTag } from "@/lib/tags";
 
@@ -38,6 +39,8 @@ export default async function MusicEntryPage({
         {entry.album && ` · ${entry.album}`}
         {entry.year && ` · ${entry.year}`}
       </p>
+
+      {entry.audioUrl && <MusicPlayButton slug={entry.slug} />}
 
       <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm text-zinc-600 dark:text-zinc-400">
         {entry.composer && (

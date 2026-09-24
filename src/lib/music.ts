@@ -13,6 +13,7 @@ export interface MusicFrontmatter {
   musicbrainzUrl?: string;
   neteaseId?: string;
   spotifyUrl?: string;
+  audioUrl?: string;
 }
 
 export interface MusicEntry extends MusicFrontmatter {
