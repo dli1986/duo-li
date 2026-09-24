@@ -43,332 +43,466 @@ char* get_data(offset_t data_offset) {
 
 这样设计的好处是**文件里的字节布局就是内存里的字节布局**——磁盘上第 `0x1000` 字节处的节点，一旦被 `mmap`，在虚拟内存里就是 `mmap_base + 0x1000` 这个地址，两者说的是同一份数据，不需要"加载时转换成另一种内存表示"这一步。这也是为什么这类结构常被称为 zero-copy：文件内容本身就是可以直接使用的内存结构。
 
-## 2. 原始可视化复刻：虚拟内存 ↔ 文件布局对照
+## 2. 可视化：B+Tree 逻辑结构 + Byte Map / 虚拟内存 / 文件布局四栏对照
 
-下面是对原始设计稿（`bptree_with_bitmap_mermaid.html`）的忠实复刻——保留原图的三栏布局、配色和文字内容：左栏是**这次进程里的虚拟内存视角**，右栏是**磁盘上的文件布局视角**，中间栏说明两者为什么是"同一份数据"。
+早先发布的版本用的是一份措辞不准确的草稿（把 bitmap 描述成 key 存在性索引），下面换成了修正稿（`Mmap with bytemap architecture.html`）的忠实复刻：bitmap 被正确地设计成 **Byte Map（空闲页分配位图）**，"key 是否存在"的概率型检查被拆成一个明确标注为 Optional、仅存在于内存的 **Bloom Filter**。上半部分是 B+Tree 逻辑结构，下半部分按四栏分别展示 Byte Map、虚拟内存、映射与操作流程、文件布局四个视角。
 
 <div className="not-prose overflow-x-auto rounded-lg border-[3px] border-[#2c3e50] bg-white p-5 font-mono text-[#2c3e50]">
-<div className="min-w-[1100px]">
-  <div className="border-b-[3px] border-[#34495e] pb-2.5 text-center text-xl font-bold text-[#2c3e50]">
-    B+ Tree Memory-Mapped Architecture: Virtual Memory ↔ File Layout Mapping
+<div className="min-w-[1400px]">
+  <div className="border-b-[3px] border-[#34495e] pb-2.5 text-center text-2xl font-bold text-[#2c3e50]">
+    🌳 Complete B+ Tree Memory-Mapped Architecture with Byte Map Indexing
   </div>
 
   <div className="my-5 rounded-lg bg-gradient-to-br from-[#667eea] to-[#764ba2] p-4 text-center text-white">
-    <p><strong>KEY INSIGHT:</strong> Parent nodes store FILE OFFSETS (not pointers). Virtual memory directly maps file offsets.</p>
-    <div className="mt-1.5 rounded bg-[#34495e] p-2 text-center font-bold text-white">Virtual Address = mmap_base + file_offset</div>
+    <strong>ARCHITECTURE OVERVIEW:</strong> Memory-mapped B+ Tree with byte map space management, direct file offset navigation, and separated data storage for optimal I/O performance. The byte map occupies the initial 16KB of the main index file.
   </div>
 
-  <div className="grid min-w-[1080px] grid-cols-[45%_10%_45%] items-start gap-5">
-    {/* LEFT: Virtual Memory Space */}
-    <div className="border-[3px] border-[#3498db] bg-[#f0f8ff] p-5">
-      <div className="mb-5 rounded bg-[#3498db] p-2.5 text-center text-lg font-bold text-white">🧠 VIRTUAL MEMORY SPACE</div>
-
-      <div className="mb-4 rounded bg-[#e74c3c] p-2 text-center font-bold text-white">mmap_base = 0x7f8000000000</div>
-
-      <div className="mb-2.5 rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2.5 text-[10px] text-[#ecf0f1]">
-        void* mmap_base = mmap(NULL, file_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+  {/* Tree section */}
+  <div className="mb-8 rounded-lg bg-gradient-to-br from-[#667eea] to-[#764ba2] p-5 text-white">
+    <div className="mb-5 text-center text-xl font-bold">🌳 B+ TREE LOGICAL STRUCTURE</div>
+    <div className="flex flex-col items-center gap-8">
+      <div className="flex w-full justify-center">
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#a93226] bg-gradient-to-br from-[#e74c3c] to-[#c0392b] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[10px] font-bold">ROOT</div>
+          <div className="my-1 text-sm font-bold">[10, 20]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x1000</div>
+        </div>
       </div>
+      <div className="text-center text-xl text-[#ecf0f1]">⬇️ ⬇️ ⬇️</div>
+      <div className="flex w-full justify-center gap-10">
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#d35400] bg-gradient-to-br from-[#f39c12] to-[#e67e22] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[10px] font-bold">INTERNAL</div>
+          <div className="my-1 text-sm font-bold">[5]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x2000</div>
+        </div>
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#d35400] bg-gradient-to-br from-[#f39c12] to-[#e67e22] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[10px] font-bold">INTERNAL</div>
+          <div className="my-1 text-sm font-bold">[15]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x3000</div>
+        </div>
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#d35400] bg-gradient-to-br from-[#f39c12] to-[#e67e22] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[10px] font-bold">INTERNAL</div>
+          <div className="my-1 text-sm font-bold">[25]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x4000</div>
+        </div>
+      </div>
+      <div className="text-center text-xl text-[#ecf0f1]">⬇️ ⬇️ ⬇️ ⬇️ ⬇️ ⬇️</div>
+      <div className="flex w-full justify-center gap-10">
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#1e8449] bg-gradient-to-br from-[#27ae60] to-[#229954] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[9px] font-bold">LEAF</div>
+          <div className="my-1 text-[10px] font-bold">[1,3,4]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x5000</div>
+        </div>
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#1e8449] bg-gradient-to-br from-[#27ae60] to-[#229954] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[9px] font-bold">LEAF</div>
+          <div className="my-1 text-[10px] font-bold">[6,7,8]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x6000</div>
+        </div>
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#1e8449] bg-gradient-to-br from-[#27ae60] to-[#229954] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[9px] font-bold">LEAF</div>
+          <div className="my-1 text-[10px] font-bold">[12,13,14]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x7000</div>
+        </div>
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#1e8449] bg-gradient-to-br from-[#27ae60] to-[#229954] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[9px] font-bold">LEAF</div>
+          <div className="my-1 text-[10px] font-bold">[16,17,18]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x8000</div>
+        </div>
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#1e8449] bg-gradient-to-br from-[#27ae60] to-[#229954] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[9px] font-bold">LEAF</div>
+          <div className="my-1 text-[10px] font-bold">[22,23,24]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0x9000</div>
+        </div>
+        <div className="min-w-[120px] rounded-lg border-[3px] border-[#1e8449] bg-gradient-to-br from-[#27ae60] to-[#229954] p-3 text-center text-white shadow-lg">
+          <div className="mb-1 text-[9px] font-bold">LEAF</div>
+          <div className="my-1 text-[10px] font-bold">[26,27,28]</div>
+          <div className="mt-1 inline-block rounded bg-black/30 px-1 py-0.5 text-[9px] text-[#ecf0f1]">@0xA000</div>
+        </div>
+      </div>
+      <div className="text-center text-xl text-[#ecf0f1]">⬇️ DATA RECORDS ⬇️</div>
+      <div className="flex flex-wrap justify-center gap-5">
+        <div className="min-w-[80px] rounded-md bg-gradient-to-br from-[#8e44ad] to-[#9b59b6] p-2 text-center text-[10px] text-white">
+          <div>Key=1</div>
+          <div>@0x10000</div>
+          <div>&quot;John Doe&quot;</div>
+        </div>
+        <div className="min-w-[80px] rounded-md bg-gradient-to-br from-[#8e44ad] to-[#9b59b6] p-2 text-center text-[10px] text-white">
+          <div>Key=3</div>
+          <div>@0x10100</div>
+          <div>&quot;Jane Smith&quot;</div>
+        </div>
+        <div className="min-w-[80px] rounded-md bg-gradient-to-br from-[#8e44ad] to-[#9b59b6] p-2 text-center text-[10px] text-white">
+          <div>Key=4</div>
+          <div>@0x10200</div>
+          <div>&quot;Bob Wilson&quot;</div>
+        </div>
+        <div className="min-w-[80px] rounded-md bg-gradient-to-br from-[#8e44ad] to-[#9b59b6] p-2 text-center text-[10px] text-white">
+          <div>Key=6</div>
+          <div>@0x10300</div>
+          <div>&quot;Alice Brown&quot;</div>
+        </div>
+        <div className="min-w-[80px] rounded-md bg-gradient-to-br from-[#8e44ad] to-[#9b59b6] p-2 text-center text-[10px] text-white">
+          <div>Key=7</div>
+          <div>@0x10400</div>
+          <div>&quot;Charlie Davis&quot;</div>
+        </div>
+        <div className="min-w-[80px] rounded-md bg-gradient-to-br from-[#8e44ad] to-[#9b59b6] p-2 text-center text-[10px] text-white">
+          <div>...</div>
+          <div>More Records</div>
+          <div>&quot;...&quot;</div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-      <div className="relative my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">
+  {/* 4-column memory architecture */}
+  <div className="grid grid-cols-4 gap-4">
+    {/* Byte Map column */}
+    <div className="rounded-lg border-[3px] border-[#9b59b6] bg-gradient-to-b from-[#f8f4ff] to-[#f0e6ff] p-4">
+      <div className="mb-4 rounded bg-[#9b59b6] p-2.5 text-center text-base font-bold text-white">🎯 BYTE MAP INDEXING</div>
+      <div className="my-2 rounded border-2 border-dashed border-[#f39c12] bg-[#fefcf5] p-2 text-[10px]">
+        <strong>Purpose:</strong> Free space management for 4KB pages. Occupies initial 16KB of the file.<br />
+        It&apos;s a byte map with a header, followed by a byte array.
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">
+          <span className="text-[#9b59b6]">file_start</span> = 0x0000
+        </div>
+        <div>
+          <strong>Free Space Byte Map (16KB)</strong><br />
+          Tracks allocated/free 4KB pages within the file.<br />
+          <code>array[0]</code> refers to offset <code>16k</code> (0x4000), <code>array[1]</code> to <code>16k + 4k</code> (0x5000), etc.
+        </div>
+        <div className="my-2 rounded border-2 border-[#9b59b6] bg-[#e8d5f2] p-2.5">
+          <div className="my-1 font-mono text-xs font-bold tracking-wide text-[#7d3c98]">0x00 0x00 0x01 0x01 ...</div>
+          <small>Each byte represents allocation status for a block of pages.</small>
+        </div>
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">Conceptual Page Allocation (from Byte Map)</div>
+        <div>
+          Page at <code>0x1000</code> (conceptual) is allocated (Root)<br />
+          Page at <code>0x2000</code> (conceptual) is allocated (Internal)<br />
+          Page at <code>0x3000</code> (conceptual) is allocated (Internal)<br />
+          Page at <code>0x4000</code> (conceptual) is allocated (Internal)<br />
+          Page at <code>0x5000</code> (conceptual) is allocated (Leaf)<br />
+          Page at <code>0x6000</code> (conceptual) is allocated (Leaf)<br />
+          Page at <code>0x7000</code> (conceptual) is free<br />
+          Page at <code>0x8000</code> (conceptual) is free
+        </div>
+      </div>
+      <div className="my-2 overflow-x-auto rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2.5 text-[9px] text-[#ecf0f1]">
+        // Byte map is part of the mmap&apos;d file<br />
+        // It occupies the first 16KB (0x0000-0x3FFF)<br />
+        typedef struct &#123;<br />
+        &nbsp;&nbsp;uint8_t* byte_map_array; // Starts after bitmap header<br />
+        &nbsp;&nbsp;uint32_t total_pages;<br />
+        &nbsp;&nbsp;uint32_t free_pages;<br />
+        &#125; ByteMapManager;<br />
+        <br />
+        // Fast allocation based on 4KB pages<br />
+        offset_t alloc_page(ByteMapManager* bm) &#123;<br />
+        &nbsp;&nbsp;// Find first free byte/index in the byte_map_array<br />
+        &nbsp;&nbsp;int free_idx = find_first_free_byte(bm-&gt;byte_map_array);<br />
+        &nbsp;&nbsp;set_byte_allocated(bm-&gt;byte_map_array, free_idx);<br />
+        &nbsp;&nbsp;// Convert index to file offset: conceptual_btree_start_offset + free_idx * 4KB<br />
+        &nbsp;&nbsp;return 0x4000 + (offset_t)free_idx * 4096;<br />
+        &#125;
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">Bloom Filter (Optional)</div>
+        <div>
+          <strong>Key Existence Check</strong><br />
+          Size: 1024 bits<br />
+          Hash functions: 3
+        </div>
+        <div className="my-2 rounded border-2 border-[#9b59b6] bg-[#e8d5f2] p-2.5">
+          <div className="my-1 font-mono text-xs font-bold tracking-wide text-[#7d3c98]">00100101 11000010 01010100</div>
+          <small>Quick &quot;key might exist&quot; check (in-memory)</small>
+        </div>
+      </div>
+      <div className="my-4 rounded bg-gradient-to-br from-[#2ecc71] to-[#27ae60] p-3 text-[11px] text-white">
+        <strong>BYTE MAP BENEFITS:</strong><br />
+        • O(1) free page lookup<br />
+        • Reduced fragmentation<br />
+        • Direct mapping within file<br />
+        • OS page cache optimization for bitmap access
+      </div>
+      <div className="my-2 rounded border-2 border-dashed border-[#f39c12] bg-[#fefcf5] p-2 text-[10px]">
+        <strong>Persistence:</strong><br />
+        The byte map is part of the main <code>btree.db</code> file and is persisted with it through the OS&apos;s memory-mapping mechanisms.
+      </div>
+    </div>
+
+    {/* Virtual Memory column */}
+    <div className="rounded-lg border-[3px] border-[#3498db] bg-gradient-to-b from-[#f0f8ff] to-[#e6f3ff] p-4">
+      <div className="mb-4 rounded bg-[#3498db] p-2.5 text-center text-base font-bold text-white">🧠 VIRTUAL MEMORY (mmap)</div>
+      <div className="mb-4 rounded bg-[#e74c3c] p-2 text-center text-xs font-bold text-white">mmap_base = 0x7f8000000000</div>
+      <div className="my-2 overflow-x-auto rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2 text-[9px] text-[#ecf0f1]">
+        void* mmap_base = mmap(NULL, file_size,<br />
+        &nbsp;&nbsp;&nbsp;&nbsp;PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">
           <span className="text-[#3498db]">0x7f8000001000</span> = base + <span className="text-[#e74c3c]">0x1000</span>
         </div>
-        <div className="text-[11px]">
-          <strong>ROOT NODE (Internal)</strong><br />
+        <div>
+          <strong>ROOT NODE</strong><br />
           Keys: [10, 20]<br />
-          Child Offsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x2000</span>
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x3000</span>
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x4000</span>
+          Child Offsets: 0x2000 0x3000 0x4000
         </div>
       </div>
-
-      <div className="relative my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">
           <span className="text-[#3498db]">0x7f8000002000</span> = base + <span className="text-[#e74c3c]">0x2000</span>
         </div>
-        <div className="text-[11px]">
+        <div>
           <strong>INTERNAL NODE</strong><br />
           Keys: [5]<br />
-          Child Offsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x5000</span>
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x6000</span>
+          Child Offsets: 0x5000 0x6000
         </div>
       </div>
-
-      <div className="relative my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">
           <span className="text-[#3498db]">0x7f8000003000</span> = base + <span className="text-[#e74c3c]">0x3000</span>
         </div>
-        <div className="text-[11px]">
+        <div>
           <strong>INTERNAL NODE</strong><br />
           Keys: [15]<br />
-          Child Offsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x7000</span>
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x8000</span>
+          Child Offsets: 0x7000 0x8000
         </div>
       </div>
-
-      <div className="relative my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">
           <span className="text-[#3498db]">0x7f8000004000</span> = base + <span className="text-[#e74c3c]">0x4000</span>
         </div>
-        <div className="text-[11px]">
+        <div>
           <strong>INTERNAL NODE</strong><br />
           Keys: [25]<br />
-          Child Offsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x9000</span>
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0xA000</span>
+          Child Offsets: 0x9000 0xA000
         </div>
       </div>
-
-      <div className="relative my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">
           <span className="text-[#3498db]">0x7f8000005000</span> = base + <span className="text-[#e74c3c]">0x5000</span>
         </div>
-        <div className="text-[11px]">
+        <div>
           <strong>LEAF NODE</strong><br />
           Keys: [1, 3, 4]<br />
-          Data Pointers:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10000</span>
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10100</span>
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10200</span><br />
-          Next Leaf: <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x6000</span>
-        </div>
-        <div className="mt-2 rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2.5 text-[10px] text-[#ecf0f1]">
-          char* data1 = (char*)(mmap_base + 0x10000);<br />
-          char* data2 = (char*)(mmap_base + 0x10100);
+          Data Pointers: 0x10000 0x10100 0x10200<br />
+          Next: 0x6000
         </div>
       </div>
-
-      <div className="relative my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">
           <span className="text-[#3498db]">0x7f8000006000</span> = base + <span className="text-[#e74c3c]">0x6000</span>
         </div>
-        <div className="text-[11px]">
+        <div>
           <strong>LEAF NODE</strong><br />
           Keys: [6, 7, 8]<br />
-          Data Pointers:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10300</span>
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10400</span>
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10500</span><br />
-          Next Leaf: <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x7000</span>
+          Data Pointers: 0x10300 0x10400 0x10500<br />
+          Next: 0x7000
         </div>
       </div>
-
-      <div className="mt-4 rounded border-2 border-[#27ae60] bg-[#d5f4e6] p-4">
-        <div className="mb-2.5 text-center font-bold text-[#27ae60]">📄 LEAF DATA (Virtual Memory)</div>
-        <div className="my-1 rounded border-2 border-[#34495e] bg-white p-2">
-          <span className="text-[#3498db]">0x7f8000010000</span> = base + <span className="text-[#e74c3c]">0x10000</span><br />
-          <small>Record for key=1: &quot;John Doe, Age 25&quot;</small>
-        </div>
-        <div className="my-1 rounded border-2 border-[#34495e] bg-white p-2">
-          <span className="text-[#3498db]">0x7f8000010100</span> = base + <span className="text-[#e74c3c]">0x10100</span><br />
-          <small>Record for key=3: &quot;Jane Smith, Age 30&quot;</small>
-        </div>
-        <div className="my-1 rounded border-2 border-[#34495e] bg-white p-2">
-          <span className="text-[#3498db]">0x7f8000010200</span> = base + <span className="text-[#e74c3c]">0x10200</span><br />
-          <small>Record for key=4: &quot;Bob Wilson, Age 28&quot;</small>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-[#d5f4e6] p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">LEAF DATA SECTION</div>
+        <div>
+          <span className="text-[#3498db]">0x7f8000010000</span>: &quot;John Doe, Age 25&quot;<br />
+          <span className="text-[#3498db]">0x7f8000010100</span>: &quot;Jane Smith, Age 30&quot;<br />
+          <span className="text-[#3498db]">0x7f8000010200</span>: &quot;Bob Wilson, Age 28&quot;<br />
+          <span className="text-[#3498db]">0x7f8000010300</span>: &quot;Alice Brown, Age 32&quot;<br />
+          <span className="text-[#3498db]">0x7f8000010400</span>: &quot;Charlie Davis, Age 29&quot;
         </div>
       </div>
-
-      <div className="relative my-2 rounded border-2 border-dashed border-[#8e44ad] bg-[#f5eaf7] p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">
-          <span className="text-[#3498db]">0x7f8000020000</span> = base + <span className="text-[#e74c3c]">0x20000</span>
-        </div>
-        <div className="text-[11px]">
-          <strong>BITMAP INDEX</strong><br />
-          Each bit indicates whether a page contains a key.<br />
-          - 1 = Page has key(s)<br />
-          - 0 = Page is empty or not indexed<br /><br />
-          Usage: Quickly check if a leaf page <em>may</em> contain a key.
-        </div>
-        <div className="mt-2 rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2.5 text-[10px] text-[#ecf0f1]">
-          uint64_t* bitmap = (uint64_t*)(mmap_base + 0x20000);<br />
-          int page_id = key_to_page(key); // Based on range partitioning<br />
-          bool maybe_present = bitmap[page_id / 64] &amp; (1ULL &lt;&lt; (page_id % 64));
-        </div>
-      </div>
-    </div>
-
-    {/* MIDDLE: Mapping arrows */}
-    <div className="flex h-full flex-col items-center justify-around gap-3">
-      {["Same Offset", "Direct Mapping", "OS Page Cache", "File I/O", "Persistent Storage"].map((label) => (
-        <div key={label} className="flex flex-col items-center text-2xl font-bold text-[#2c3e50]">
-          ➡️
-          <div className="mt-1 whitespace-nowrap rounded-full bg-[#2c3e50] px-2.5 py-1 text-[10px] text-white">{label}</div>
-        </div>
-      ))}
-
-      <div className="rounded border-2 border-dashed border-[#f39c12] bg-[#fefcf5] p-2 text-[11px]">
-        <strong>Critical Insight:</strong><br />
-        Virtual memory offsets = File offsets<br />
-        No translation needed!
-      </div>
-
-      <div className="rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2.5 text-left text-[10px] text-[#ecf0f1]">
-        // Navigation using file offsets<br />
-        Node* get_node(offset_t file_offset) {"{"}<br />
+      <div className="my-2 overflow-x-auto rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2 text-[9px] text-[#ecf0f1]">
+        // Direct pointer arithmetic navigation using file offsets<br />
+        Node* get_node(offset_t file_offset) &#123;<br />
         &nbsp;&nbsp;return (Node*)(mmap_base + file_offset);<br />
-        {"}"}<br /><br />
-        // Parent stores child&apos;s file offset<br />
-        Node* get_child(Node* parent, int idx) {"{"}<br />
+        &#125;<br />
+        <br />
+        Node* get_child(Node* parent, int idx) &#123;<br />
         &nbsp;&nbsp;offset_t child_offset = parent-&gt;child_offsets[idx];<br />
-        &nbsp;&nbsp;return get_node(child_offset); // Direct mapping!<br />
-        {"}"}
-      </div>
-
-      <div className="rounded border-2 border-dashed border-[#f39c12] bg-[#fefcf5] p-2 text-left text-[11px]">
-        <strong>Bitmap Index Logic:</strong><br />
-        1. Map key → page_id<br />
-        2. Check if bitmap[page_id] bit is set<br />
-        3. If set, scan corresponding leaf page<br /><br />
-        Benefit: Avoids unnecessary page access when key is definitely absent.
+        &nbsp;&nbsp;return get_node(child_offset);<br />
+        &#125;<br />
+        <br />
+        char* get_data(offset_t data_offset) &#123;<br />
+        &nbsp;&nbsp;return (char*)(mmap_base + data_offset);<br />
+        &#125;
       </div>
     </div>
 
-    {/* RIGHT: File Layout */}
-    <div className="border-[3px] border-[#e67e22] bg-[#fef9f5] p-5">
-      <div className="mb-5 rounded bg-[#e67e22] p-2.5 text-center text-lg font-bold text-white">💾 OS FILE LAYOUT (On Disk)</div>
-
-      <div className="mb-2.5 rounded border-2 border-dashed border-[#f39c12] bg-[#fefcf5] p-2 text-[11px]">
-        <strong>File Structure:</strong> All B+ Tree nodes first, then leaf data
+    {/* Mapping & Operations column */}
+    <div className="rounded-lg border-[3px] border-[#f39c12] bg-gradient-to-b from-[#fffaf0] to-[#fff5e6] p-4">
+      <div className="mb-4 rounded bg-[#f39c12] p-2.5 text-center text-base font-bold text-white">🔄 MAPPING &amp; OPERATIONS</div>
+      <div className="my-2.5 text-center text-lg text-[#2c3e50]">⬅️ BYTE MAP MANAGEMENT ➡️</div>
+      <div className="my-2 rounded border-2 border-dashed border-[#f39c12] bg-[#fefcf5] p-2 text-[10px]">
+        The byte map is memory-mapped as part of the main <code>btree.db</code> file (first 16KB), allowing direct access via <code>mmap_base + offset</code>.
       </div>
+      <div className="my-2.5 text-center text-lg text-[#2c3e50]">⬅️ DIRECT MAPPING ➡️</div>
+      <div className="my-2 rounded border-2 border-dashed border-[#f39c12] bg-[#fefcf5] p-2 text-[10px]">
+        <strong>Virtual Address = mmap_base + file_offset</strong><br />
+        No translation needed! All B+ tree nodes and data are accessed via this direct mapping.
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">Search Operation Flow</div>
+        <div>
+          1. <strong>Bloom Filter Check:</strong><br />
+          <code>hash(key) → bloom_filter</code><br /><br />
+          2. <strong>Root Navigation:</strong><br />
+          <span className="text-[#3498db]">root = mmap_base + ROOT_OFFSET</span> (e.g., 0x1000 as depicted)<br /><br />
+          3. <strong>Tree Traversal:</strong><br />
+          <code>child_offset = node-&gt;child_offsets[idx]</code><br />
+          <span className="text-[#3498db]">child = mmap_base + child_offset</span><br /><br />
+          4. <strong>Data Access:</strong><br />
+          <code>data_offset = leaf-&gt;data_offsets[j]</code><br />
+          <span className="text-[#3498db]">data = mmap_base + data_offset</span>
+        </div>
+      </div>
+      <div className="my-2 overflow-x-auto rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2 text-[9px] text-[#ecf0f1]">
+        // Complete search operation<br />
+        SearchResult search(int key) &#123;<br />
+        &nbsp;&nbsp;// 1. Quick bloom filter check<br />
+        &nbsp;&nbsp;if (!bloom_might_contain(&amp;bloom, key)) &#123;<br />
+        &nbsp;&nbsp;&nbsp;&nbsp;return NOT_FOUND;<br />
+        &nbsp;&nbsp;&#125;<br />
+        <br />
+        &nbsp;&nbsp;// 2. Navigate from root (adjusting for conceptual start of nodes)<br />
+        &nbsp;&nbsp;// Assuming ROOT_OFFSET points to the depicted 0x1000<br />
+        &nbsp;&nbsp;Node* node = get_node(ROOT_OFFSET);<br />
+        <br />
+        &nbsp;&nbsp;// 3. Tree traversal<br />
+        &nbsp;&nbsp;while (node-&gt;type == INTERNAL) &#123;<br />
+        &nbsp;&nbsp;&nbsp;&nbsp;int idx = binary_search(node-&gt;keys, key);<br />
+        &nbsp;&nbsp;&nbsp;&nbsp;offset_t child_offset = node-&gt;child_offsets[idx];<br />
+        &nbsp;&nbsp;&nbsp;&nbsp;node = get_node(child_offset);<br />
+        &nbsp;&nbsp;&#125;<br />
+        <br />
+        &nbsp;&nbsp;// 4. Leaf search<br />
+        &nbsp;&nbsp;int idx = binary_search(node-&gt;keys, key);<br />
+        &nbsp;&nbsp;if (node-&gt;keys[idx] == key) &#123;<br />
+        &nbsp;&nbsp;&nbsp;&nbsp;offset_t data_offset = node-&gt;data_offsets[idx];<br />
+        &nbsp;&nbsp;&nbsp;&nbsp;char* data = get_data(data_offset);<br />
+        &nbsp;&nbsp;&nbsp;&nbsp;return SUCCESS(data);<br />
+        &nbsp;&nbsp;&#125;<br />
+        <br />
+        &nbsp;&nbsp;return NOT_FOUND;<br />
+        &#125;
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">Insert Operation Flow</div>
+        <div>
+          1. <strong>Find free page:</strong><br />
+          <code>Find free index in byte_map_array</code><br /><br />
+          2. <strong>Allocate space:</strong><br />
+          <code>Set byte in map to allocated</code><br /><br />
+          3. <strong>Calculate new offset:</strong><br />
+          <code>new_offset = conceptual_btree_start_offset + index * 4KB</code><br /><br />
+          4. <strong>Update bloom filter:</strong><br />
+          <code>bloom_add(&amp;bloom, key)</code>
+        </div>
+      </div>
+      <div className="my-4 rounded bg-gradient-to-br from-[#2ecc71] to-[#27ae60] p-3 text-[11px] text-white">
+        <strong>PERFORMANCE BENEFITS:</strong><br />
+        • Zero-copy file loading via mmap<br />
+        • OS page cache optimization<br />
+        • Direct pointer arithmetic for node/data access<br />
+        • Efficient in-file byte map space management<br />
+        • Fast existence checks with Bloom filter
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">Memory Layout Strategy</div>
+        <div>
+          <strong>Separated Storage within btree.db:</strong><br />
+          • <strong>Byte Map:</strong> Initial 16KB of the file<br />
+          • <strong>Tree nodes:</strong> Follow after the byte map<br />
+          • <strong>Leaf data:</strong> Located at the end of the file<br />
+          • <strong>Bloom filter:</strong> In-memory only
+        </div>
+      </div>
+    </div>
 
-      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x0000</span> (0 bytes)</div>
-        <div className="text-[11px]">
+    {/* File Layout column */}
+    <div className="rounded-lg border-[3px] border-[#e67e22] bg-gradient-to-b from-[#fef9f5] to-[#fdf2e9] p-4">
+      <div className="mb-4 rounded bg-[#e67e22] p-2.5 text-center text-base font-bold text-white">💾 FILE LAYOUT (Persistent)</div>
+      <div className="my-2 rounded border-2 border-dashed border-[#f39c12] bg-[#fefcf5] p-2 text-[10px]">
+        <strong>btree.db:</strong> The main B+ tree index file, including the byte map.<br />
+        Total index file size: 128KB.
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x0000</span> (0 bytes)</div>
+        <div>
           <strong>FILE HEADER</strong><br />
           Magic: 0xB7EE, Version: 1<br />
-          Root Offset: <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x1000</span><br />
-          Node Count: 6, Data Start: <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10000</span>
+          File Size: 128KB<br />
+          Root Offset: 0x1000 (as depicted in tree)
         </div>
       </div>
-
-      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x1000</span> (4096 bytes)</div>
-        <div className="text-[11px]">
-          <strong>ROOT NODE (Serialized)</strong><br />
-          [Type: Internal] [KeyCount: 2]<br />
-          [Keys: 10, 20]<br />
-          [ChildOffsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x2000</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x3000</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x4000</span>]
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x0000 - 0x3FFF</span> (First 16KB)</div>
+        <div>
+          <strong>BYTE MAP ARRAY &amp; HEADER</strong><br />
+          Used for tracking 4KB page allocation status. <code>array[i]</code> maps to a page at <code>16k + i*4k</code>.
         </div>
       </div>
-
-      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x2000</span> (8192 bytes)</div>
-        <div className="text-[11px]">
-          <strong>INTERNAL NODE</strong><br />
-          [Type: Internal] [KeyCount: 1]<br />
-          [Keys: 5]<br />
-          [ChildOffsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x5000</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x6000</span>]
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x1000</span> (4096 bytes)</div>
+        <div>
+          <strong>ROOT NODE (Conceptual B+ Tree Nodes Start)</strong><br />
+          The B+ tree nodes section effectively begins here for addressing as shown in the tree structure, following the initial 16KB byte map.
         </div>
       </div>
-
-      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x3000</span> (12288 bytes)</div>
-        <div className="text-[11px]">
-          <strong>INTERNAL NODE</strong><br />
-          [Type: Internal] [KeyCount: 1]<br />
-          [Keys: 15]<br />
-          [ChildOffsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x7000</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x8000</span>]
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x2000</span></div>
+        <div><strong>INTERNAL NODE</strong><br />...</div>
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x3000</span></div>
+        <div><strong>INTERNAL NODE</strong><br />...</div>
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x4000</span></div>
+        <div><strong>INTERNAL NODE</strong><br />...</div>
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x5000</span></div>
+        <div><strong>LEAF NODE</strong><br />...</div>
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x6000</span></div>
+        <div><strong>LEAF NODE</strong><br />...</div>
+      </div>
+      <div className="my-2 rounded border-2 border-[#34495e] bg-[#d5f4e6] p-2.5 text-[11px]">
+        <div className="mb-1.5 border-b border-[#bdc3c7] pb-1 text-[10px] font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x10000</span> (65536 bytes)</div>
+        <div>
+          <strong>LEAF DATA SECTION</strong><br />
+          Actual data records stored here.
         </div>
       </div>
-
-      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x4000</span> (16384 bytes)</div>
-        <div className="text-[11px]">
-          <strong>INTERNAL NODE</strong><br />
-          [Type: Internal] [KeyCount: 1]<br />
-          [Keys: 25]<br />
-          [ChildOffsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x9000</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0xA000</span>]
-        </div>
-      </div>
-
-      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x5000</span> (20480 bytes)</div>
-        <div className="text-[11px]">
-          <strong>LEAF NODE</strong><br />
-          [Type: Leaf] [KeyCount: 3]<br />
-          [Keys: 1, 3, 4]<br />
-          [DataOffsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10000</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10100</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10200</span>]<br />
-          [NextLeaf: <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x6000</span>]
-        </div>
-      </div>
-
-      <div className="my-2 rounded border-2 border-[#34495e] bg-white p-3">
-        <div className="mb-2 border-b border-[#bdc3c7] pb-1 font-bold text-[#2c3e50]">File Offset: <span className="text-[#e74c3c]">0x6000</span> (24576 bytes)</div>
-        <div className="text-[11px]">
-          <strong>LEAF NODE</strong><br />
-          [Type: Leaf] [KeyCount: 3]<br />
-          [Keys: 6, 7, 8]<br />
-          [DataOffsets:{" "}
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10300</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10400</span>,
-          <span className="mx-0.5 inline-block rounded bg-[#27ae60] px-1.5 py-0.5 font-bold text-white">0x10500</span>]<br />
-          [NextLeaf: <span className="mx-0.5 inline-block rounded bg-[#f39c12] px-1.5 py-0.5 font-bold text-white">0x7000</span>]
-        </div>
-      </div>
-
-      <div className="mt-4 rounded border-2 border-[#27ae60] bg-[#d5f4e6] p-4">
-        <div className="mb-2.5 text-center font-bold text-[#27ae60]">📄 LEAF DATA (File Storage)</div>
-        <div className="my-1 rounded border-2 border-[#34495e] bg-white p-2">
-          File Offset: <span className="text-[#e74c3c]">0x10000</span> (65536 bytes)<br />
-          <small>[Length:20][Data:&quot;John Doe, Age 25&quot;]</small>
-        </div>
-        <div className="my-1 rounded border-2 border-[#34495e] bg-white p-2">
-          File Offset: <span className="text-[#e74c3c]">0x10100</span> (65792 bytes)<br />
-          <small>[Length:22][Data:&quot;Jane Smith, Age 30&quot;]</small>
-        </div>
-        <div className="my-1 rounded border-2 border-[#34495e] bg-white p-2">
-          File Offset: <span className="text-[#e74c3c]">0x10200</span> (66048 bytes)<br />
-          <small>[Length:21][Data:&quot;Bob Wilson, Age 28&quot;]</small>
-        </div>
-      </div>
-
-      <div className="mt-2.5 rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2.5 text-[10px] text-[#ecf0f1]">
-        // File structure on disk:<br />
-        // 0x0000-0x0FFF: File header &amp; metadata<br />
-        // 0x1000-0xFFFF: All B+ tree nodes<br />
-        // 0x10000+: Leaf data records<br /><br />
-        struct FileLayout {"{"}<br />
+      <div className="my-2 overflow-x-auto rounded border-l-4 border-[#f39c12] bg-[#2c3e50] p-2 text-[9px] text-[#ecf0f1]">
+        // File structure on disk (conceptual overview given diagram offsets):<br />
+        // 0x0000-0x3FFF: File header &amp; 16KB Byte Map for page allocation<br />
+        // 0x4000:        Conceptual B-tree header / first B-tree data block<br />
+        //                (However, nodes in this diagram start addressing from 0x1000)<br />
+        // 0x1000-0xFFFF: All B+ tree nodes (as depicted)<br />
+        // 0x10000+:      Leaf data records<br />
+        <br />
+        struct FileLayout &#123;<br />
         &nbsp;&nbsp;FileHeader header; // @0x0000<br />
-        &nbsp;&nbsp;BTreeNode nodes[]; // @0x1000+<br />
+        &nbsp;&nbsp;uint8_t byte_map[16*1024]; // @0x0000-0x3FFF, including its header<br />
+        &nbsp;&nbsp;BTreeNode nodes[]; // Conceptual start after byte map (e.g., 0x4000)<br />
         &nbsp;&nbsp;DataRecord leaf_data[]; // @0x10000+<br />
-        {"}"};
+        &#125;;
       </div>
     </div>
   </div>
-
-  <div className="mt-5 rounded-lg bg-gradient-to-br from-[#667eea] to-[#764ba2] p-4 text-white">
-    <strong>🎯 ARCHITECTURAL BENEFITS:</strong><br />
-    1. <strong>Zero-Copy Loading:</strong> mmap() directly maps file → memory, no deserialization<br />
-    2. <strong>Offset Portability:</strong> File offsets work as memory offsets regardless of base address<br />
-    3. <strong>Efficient Navigation:</strong> Child access = simple pointer arithmetic<br />
-    4. <strong>Separated Storage:</strong> Tree structure and data stored independently for optimal layout
-  </div>
 </div>
 </div>
 
-*以上是原始 HTML 草图（`bptree_with_bitmap_mermaid.html`，2026 年 7 月 1 日）的逐字段复刻——配色、分栏结构、每个 offset 数值都与原稿一致，只是从独立 HTML 文件迁移成了页面内嵌的组件。下面几节是在这份原始素材基础上重新组织的文字讲解，两者互补：这一节负责"一眼看全貌"，下面负责"讲清楚为什么"。*
+*以上是修正稿（`Mmap with bytemap architecture.html`）的忠实复刻——配色、分栏结构、每个 offset 数值都与原稿一致，只是从独立 HTML 文件迁移成了页面内嵌的组件。下面几节是在这份素材基础上重新组织的文字讲解，两者互补：这一节负责"一眼看全貌"，下面负责"讲清楚为什么"。*
 
-> **勘误（2026-09-24）**：上面这份可视化图逐字保留了最初网页工具生成的措辞——把 bitmap 描述成"精确标记某一页是否包含某个 key"的存在性索引。后来重新核对了一遍这类"mmap + 位图"架构在真实存储引擎里的常见做法，发现这个描述其实不准确：这类位图通常回答的是"这一块是不是空闲"，而不是"这一页有没有 key X"，本质是一个**空闲块分配位图（Byte Map）**，服务于分配器，不服务于查找。图作为历史素材原样保留，不做改动；下面第 4 节按照修正后的语义重新说明。
+## 3. 逻辑结构：一棵具体的 B+Tree（补充范围扫描链表视角）
 
-## 3. 逻辑结构：一棵具体的 B+Tree
-
-下面是一棵具体的三层 B+Tree（root → internal → leaf），每个节点标注了它的 key 范围和对应的文件偏移量；叶子节点之间还有一条从左到右的链表（图中的水平虚线箭头），用于范围扫描时不需要回到上层节点就能顺序读取下一个叶子；每个叶子节点还与下方的 Byte Map（空闲页分配位图）建立了逻辑关联（虚线），因为位图里的一个 bit 对应文件里的一个页——标记的是这个页当前是不是空闲，不是这个页里有没有某个 key：
+上面的图已经完整展示了 B+Tree 结构和 Byte Map/虚拟内存/文件布局的对照，这里再补一张更紧凑的版本，专门标出上面没画的两处细节：叶子节点之间从左到右的链表（图中的水平虚线箭头，范围扫描时不需要回到上层节点就能顺序读取下一个叶子）、以及每个叶子页和下方 Byte Map 里对应 bit 的逻辑关联（虚线）——位图里的一个 bit 对应文件里的一个页，标记的是这个页当前是不是空闲，不是这个页里有没有某个 key：
 
 
 <svg viewBox="0 0 900 400" width="900" height="400" xmlns="http://www.w3.org/2000/svg" className="h-auto max-w-full">
