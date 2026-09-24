@@ -56,6 +56,8 @@ export default async function ProjectPage({
       {project.repository && (
         <a
           href={project.repository}
+          target="_blank"
+          rel="noopener noreferrer"
           className="mt-4 inline-block text-sm text-accent hover:underline"
         >
           View repository &rarr;
@@ -65,6 +67,8 @@ export default async function ProjectPage({
       {project.demoUrl && (
         <a
           href={project.demoUrl}
+          target="_blank"
+          rel="noopener noreferrer"
           className="mt-4 ml-4 inline-block text-sm text-accent hover:underline"
         >
           View live walkthrough &rarr;
