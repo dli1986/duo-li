@@ -23,11 +23,13 @@ interface MusicPlayerContextValue {
   currentIndex: number;
   isPlaying: boolean;
   shuffle: boolean;
+  repeatOne: boolean;
   play: (index: number) => void;
   toggle: () => void;
   next: () => void;
   prev: () => void;
   toggleShuffle: () => void;
+  toggleRepeatOne: () => void;
 }
 
 const MusicPlayerContext = createContext<MusicPlayerContextValue | null>(null);
@@ -43,6 +45,7 @@ export function MusicPlayerProvider({
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [shuffle, setShuffle] = useState(false);
+  const [repeatOne, setRepeatOne] = useState(false);
   // Tracks played-index history so prev() can retrace shuffled jumps.
   const historyRef = useRef<number[]>([]);
 
@@ -114,6 +117,20 @@ export function MusicPlayerProvider({
   }, [currentIndex, isPlaying, play, shuffle, randomIndex]);
 
   const toggleShuffle = useCallback(() => setShuffle((s) => !s), []);
+  const toggleRepeatOne = useCallback(() => setRepeatOne((r) => !r), []);
+
+  // Natural end-of-track: replay the same track when repeatOne is on, otherwise advance.
+  const handleEnded = useCallback(() => {
+    if (repeatOne) {
+      const audio = audioRef.current;
+      if (audio) {
+        audio.currentTime = 0;
+        audio.play().catch(() => setIsPlaying(false));
+      }
+      return;
+    }
+    next();
+  }, [repeatOne, next]);
 
   // Load + play whenever the current track changes.
   useEffect(() => {
@@ -134,13 +151,15 @@ export function MusicPlayerProvider({
       currentIndex,
       isPlaying,
       shuffle,
+      repeatOne,
       play,
       toggle,
       next,
       prev,
       toggleShuffle,
+      toggleRepeatOne,
     }),
-    [playlist, currentTrack, currentIndex, isPlaying, shuffle, play, toggle, next, prev, toggleShuffle]
+    [playlist, currentTrack, currentIndex, isPlaying, shuffle, repeatOne, play, toggle, next, prev, toggleShuffle, toggleRepeatOne]
   );
 
   return (
@@ -148,7 +167,7 @@ export function MusicPlayerProvider({
       {children}
       <audio
         ref={audioRef}
-        onEnded={next}
+        onEnded={handleEnded}
         onPause={() => setIsPlaying(false)}
         onPlay={() => setIsPlaying(true)}
       />
