@@ -5,7 +5,6 @@ import { SiteHeader } from "@/components/SiteHeader";
 import { SiteFooter } from "@/components/SiteFooter";
 import { BgmPlayer } from "@/components/BgmPlayer";
 import { MusicPlayerProvider } from "@/components/MusicPlayerProvider";
-import { MusicPlayerBar } from "@/components/MusicPlayerBar";
 import { getAllMusic } from "@/lib/music";
 import { siteConfig } from "@/lib/site";
 
@@ -42,11 +41,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="flex min-h-full flex-col bg-background text-foreground font-sans">
         <MusicPlayerProvider playlist={musicPlaylist}>
           <SiteHeader />
-          <main className="flex-1 pb-16" data-pagefind-body>
+          <main className="flex-1" data-pagefind-body>
             {children}
           </main>
           <SiteFooter />
-          <MusicPlayerBar />
         </MusicPlayerProvider>
         <BgmPlayer />
       </body>

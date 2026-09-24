@@ -22,10 +22,12 @@ interface MusicPlayerContextValue {
   currentTrack: MusicTrack | null;
   currentIndex: number;
   isPlaying: boolean;
+  shuffle: boolean;
   play: (index: number) => void;
   toggle: () => void;
   next: () => void;
   prev: () => void;
+  toggleShuffle: () => void;
 }
 
 const MusicPlayerContext = createContext<MusicPlayerContextValue | null>(null);
@@ -40,36 +42,64 @@ export function MusicPlayerProvider({
   const audioRef = useRef<HTMLAudioElement>(null);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [shuffle, setShuffle] = useState(false);
+  // Tracks played-index history so prev() can retrace shuffled jumps.
+  const historyRef = useRef<number[]>([]);
 
   const play = useCallback(
     (index: number) => {
       if (playlist.length === 0) return;
       const safeIndex = ((index % playlist.length) + playlist.length) % playlist.length;
-      setCurrentIndex(safeIndex);
+      setCurrentIndex((prevIndex) => {
+        if (prevIndex !== -1 && prevIndex !== safeIndex) {
+          historyRef.current.push(prevIndex);
+        }
+        return safeIndex;
+      });
       setIsPlaying(true);
     },
     [playlist]
   );
 
+  const randomIndex = useCallback(
+    (exclude: number) => {
+      if (playlist.length <= 1) return 0;
+      let idx = exclude;
+      while (idx === exclude) {
+        idx = Math.floor(Math.random() * playlist.length);
+      }
+      return idx;
+    },
+    [playlist]
+  );
+
   const next = useCallback(() => {
+    if (playlist.length === 0) return;
     if (currentIndex === -1) {
-      play(0);
+      play(shuffle ? randomIndex(-1) : 0);
       return;
     }
-    play(currentIndex + 1);
-  }, [currentIndex, play]);
+    play(shuffle ? randomIndex(currentIndex) : currentIndex + 1);
+  }, [currentIndex, playlist, shuffle, play, randomIndex]);
 
   const prev = useCallback(() => {
+    if (playlist.length === 0) return;
+    const previousIndex = historyRef.current.pop();
+    if (previousIndex !== undefined) {
+      setCurrentIndex(previousIndex);
+      setIsPlaying(true);
+      return;
+    }
     if (currentIndex === -1) {
       play(0);
       return;
     }
     play(currentIndex - 1);
-  }, [currentIndex, play]);
+  }, [currentIndex, playlist, play]);
 
   const toggle = useCallback(() => {
     if (currentIndex === -1) {
-      play(0);
+      play(shuffle ? randomIndex(-1) : 0);
       return;
     }
     const audio = audioRef.current;
@@ -81,7 +111,9 @@ export function MusicPlayerProvider({
       audio.play();
       setIsPlaying(true);
     }
-  }, [currentIndex, isPlaying, play]);
+  }, [currentIndex, isPlaying, play, shuffle, randomIndex]);
+
+  const toggleShuffle = useCallback(() => setShuffle((s) => !s), []);
 
   // Load + play whenever the current track changes.
   useEffect(() => {
@@ -96,8 +128,19 @@ export function MusicPlayerProvider({
   const currentTrack = currentIndex === -1 ? null : (playlist[currentIndex] ?? null);
 
   const value = useMemo<MusicPlayerContextValue>(
-    () => ({ playlist, currentTrack, currentIndex, isPlaying, play, toggle, next, prev }),
-    [playlist, currentTrack, currentIndex, isPlaying, play, toggle, next, prev]
+    () => ({
+      playlist,
+      currentTrack,
+      currentIndex,
+      isPlaying,
+      shuffle,
+      play,
+      toggle,
+      next,
+      prev,
+      toggleShuffle,
+    }),
+    [playlist, currentTrack, currentIndex, isPlaying, shuffle, play, toggle, next, prev, toggleShuffle]
   );
 
   return (
