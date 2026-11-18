@@ -1,0 +1,31 @@
+---
+title: "LeetCode Scenario Coach"
+slug: "leetcode-scenario-coach"
+status: "active"
+technologies:
+  - "Python"
+  - "GitHub Copilot SDK"
+  - "MCP"
+summary: "Bridges the gap LeetCode doesn't cover: a problem is already abstracted away from any real-world context, but real engineering starts from a concrete situation. This tool asks an LLM to reverse that process — given a LeetCode problem, it reconstructs plausible real-world scenarios and the specific constraint that forces that exact abstraction, scoped to whatever job direction you're preparing for."
+repository: "https://github.com/dli1986/leetcode-scenario-coach"
+---
+
+## Overview
+
+LeetCode problems are handed to you pre-abstracted — the hard part of real engineering (and real interviews) is doing that abstraction yourself, starting from a messy concrete situation. This tool runs that process in reverse with an LLM: given a problem (by slug or by tags), it reconstructs a plausible real-world scenario, the specific constraint that forces exactly that abstraction, and saves the result as a scenario card.
+
+## What it does
+
+1. **Looks up** the problem via [leetcode-mcp-server](https://github.com/jinzcdev/leetcode-mcp-server), attached as an MCP server directly inside the Copilot session — the model calls `get_problem`/`search_problems` itself, no LeetCode API wrapper of its own
+2. **Reasons** through situation → constraint → abstraction → problem, guided by a system prompt
+3. **Scopes** the output to a target job direction via a `profiles/*.yaml` file (focus tags, candidate domains, system prompt) — adding a new direction means adding a profile, not touching `coach.py`
+4. **Saves** the result to `output/*.json`, and optionally pushes it to Obsidian via the Local REST API plugin
+5. **Reuses** the same `CopilotClient` session pattern as `youtube-digest/scripts/copilot_proxy.py` for LLM access — runs on an existing GitHub Copilot subscription, no separate API key
+
+## Lessons Learned
+
+_To be added._
+
+## Roadmap
+
+_To be added._

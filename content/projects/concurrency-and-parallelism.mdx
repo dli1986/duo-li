@@ -1,0 +1,33 @@
+---
+title: "Concurrency and Parallelism Lab"
+slug: "concurrency-and-parallelism"
+status: "active"
+technologies:
+  - "Python"
+  - "FastAPI"
+  - "asyncio"
+  - "nginx"
+  - "Locust"
+summary: "A hands-on experiment to feel the difference between concurrency and parallelism in Python — asyncio for I/O-bound waits, ProcessPoolExecutor for CPU-bound work, nginx load-balancing across two nodes, and Locust load tests to turn the theory into reproducible, observable numbers."
+repository: "https://github.com/dli1986/ConcurrencyAndParallism"
+---
+
+## Overview
+
+A minimal, runnable example built specifically to develop real intuition for **concurrency** (asyncio) vs **parallelism** (multi-process) in Python, rather than just reading about the distinction. `app.py` exposes one endpoint that does both: an `asyncio.sleep()` to simulate I/O-bound waiting (concurrency — handled by the single event loop without needing multiple cores), and a CPU-bound calculation offloaded to a `ProcessPoolExecutor` (parallelism — genuinely uses multiple cores, since the event loop itself can't run CPU work in parallel). Two FastAPI nodes sit behind an nginx round-robin load balancer, adding a second layer: process/node-level parallelism on top of in-process parallelism.
+
+## Topics
+
+- `asyncio.sleep()` for I/O-bound concurrency vs `run_in_executor(ProcessPoolExecutor, ...)` for CPU-bound parallelism, in the same endpoint
+- nginx on Windows: `-c`/`-p` flags to load a project-local config instead of overwriting the install's default, `start nginx` instead of a foreground process (no graceful Ctrl+C on Windows — nginx uses named pipes for `-s stop/reload`, not POSIX signals)
+- Process-level observation with `psutil`, deliberately decoupled from the business code (`monitor.py` watches `app.py` from the outside, never imports it) — and why "find the process by name + cmdline substring" is unreliable on Windows (launcher/alias wrapper processes can get misidentified), fixed by passing explicit PIDs from the startup log instead
+- Locust load testing and reading its output against **Little's Law** (`concurrency ≈ RPS × average latency`) to tell whether a bottleneck is task duration or worker-pool capacity
+- A 4-scenario experiment varying `max_workers` (4 vs 6 per node) and task size, cross-checked against Task Manager's per-core view and physical core count (14 cores / 20 logical) to see diminishing returns once worker count approaches physical cores
+
+## Lessons Learned
+
+`ProcessPoolExecutor` workers are lazily spawned — only the main process exists at startup, workers fork on the first submitted task and then stay warm (plus a `resource_tracker` helper process that's easy to mistake for a worker). They only get cleaned up via the `atexit` hook when the main process exits. Also hit a red herring during browser-based testing: a leftover Service Worker from an unrelated project registered on the same localhost origin kept re-requesting its own cached assets, showing up as phantom 404s in the backend logs — curl testing is cleaner for this kind of experiment.
+
+## Roadmap
+
+_To be added._
